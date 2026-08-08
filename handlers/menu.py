@@ -9,13 +9,15 @@ handlers/menu.py
 
 import logging
 from aiogram import Router, F, types
+from aiogram.filters import BaseFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile
 
 import database as db
+from text_catalog import text as t
 import crypto
 from subscription import is_config_expired
-from utils import show_menu_with_sticker
+from utils import show_menu_with_sticker, get_main_keyboard
 from states import UserStates, AdminStates
 import bot_info
 from config import ADMIN_ID, PLANS_INTRO_TEXT, DATABASE_PATH, REFERRAL_LOCK_AMOUNT, REFERRAL_MIN_VOLUME_GB
@@ -43,6 +45,31 @@ from keyboards import (
 router = Router(name="menu")
 
 
+class _MenuButtonText(BaseFilter):
+    """فیلتر دکمه‌های ثابت منوی پایین صفحه، بر اساس کلید متن قابل‌ویرایش در «📝 مدیریت متن‌های کاربر».
+
+    🐛 فیکس دکمه‌هایی که بعد از تغییر متن از پنل ادمین از کار می‌افتادند:
+    قبلاً این دکمه‌ها با F.text.in_([متن پیش‌فرض, t(key)]) فیلتر می‌شدند. چون
+    t(key) فقط همان یک‌بار، لحظه‌ی import شدن این فایل (یعنی موقع بالا آمدن
+    ربات)، مقدار متن را از دیتابیس می‌خواند و در یک لیست ثابت ذخیره می‌کرد،
+    اگر ادمین بعداً متن دکمه را از پنل عوض می‌کرد، این فیلتر همچنان دنبال متن
+    قدیمی (همان لحظه‌ی بالا آمدن ربات) می‌گشت؛ متن جدیدِ نمایش داده‌شده روی
+    دکمه هیچ‌وقت با آن مچ نمی‌شد و در نتیجه با فشردن دکمه هیچ اتفاقی نمی‌افتاد.
+    این فیلتر به‌جای لیست ثابت، هر بار مستقیماً متن فعلی را از دیتابیس می‌خواند؛
+    بنابراین با هر تغییر متن، بدون نیاز به ری‌استارت ربات، بلافاصله کار می‌کند.
+    """
+
+    def __init__(self, key: str, default: str):
+        self.key = key
+        self.default = default
+
+    async def __call__(self, message: types.Message) -> bool:
+        if not message.text:
+            return False
+        current = db.get_text_override(self.key, self.default)
+        return message.text in (self.default, current)
+
+
 def _current_admin_permissions(user_id: int) -> set[str] | None:
     if user_id == ADMIN_ID:
         return None
@@ -68,7 +95,7 @@ def _admin_perm(user_id: int, permission: str) -> bool:
 # ---------------------------------------------------------------------------
 # منوی کاربر عادی
 # ---------------------------------------------------------------------------
-@router.message(F.text == "🛒 خرید اشتراک")
+@router.message(_MenuButtonText("main_buy", "🛒 خرید اشتراک"))
 async def menu_plans(message: types.Message, state: FSMContext):
     await state.clear()
     if not db.is_orders_enabled():
@@ -83,18 +110,18 @@ async def menu_plans(message: types.Message, state: FSMContext):
     )
     
     
-@router.message(F.text == "🎁 تست رایگان")
+@router.message(_MenuButtonText("main_free_test", "🎁 تست رایگان"))
 async def menu_free_test(message: types.Message, state: FSMContext):
     from config import FREE_TEST_PLAN_KEY
 
     if not db.is_orders_enabled():
-        await message.answer("🔴 ربات به دلیل حجم سفارشات بالا موقتاً بسته می‌باشد.")
+        await message.answer(t("orders_closed"))
         return
 
     plan = db.get_effective_plan(FREE_TEST_PLAN_KEY)
     user = db.get_user(message.from_user.id)
     if user is None:
-        await message.answer("ابتدا دستور /start را بزنید.")
+        await message.answer(t("common_start_required"))
         return
 
     await state.clear()
@@ -119,12 +146,12 @@ async def menu_free_test(message: types.Message, state: FSMContext):
     )
 
 
-@router.message(F.text == "📱 سرویس‌های من")
+@router.message(_MenuButtonText("main_configs", "📱 سرویس‌های من"))
 async def menu_my_configs(message: types.Message, state: FSMContext):
     await state.clear()
     user = db.get_user(message.from_user.id)
     if user is None:
-        await message.answer("ابتدا دستور /start را بزنید.")
+        await message.answer(t("common_start_required"))
         return
 
     configs = [c for c in db.get_configs(user["id"]) if not is_config_expired(c)]
@@ -142,92 +169,61 @@ async def menu_my_configs(message: types.Message, state: FSMContext):
         )
 
 
-@router.message(F.text == "💰 کیف پول")
+@router.message(_MenuButtonText("main_wallet", "💰 کیف پول"))
 async def menu_wallet(message: types.Message, state: FSMContext):
     await state.clear()
     user = db.get_user(message.from_user.id)
     if user is None:
-        await message.answer("ابتدا دستور /start را بزنید.")
+        await message.answer(t("common_start_required"))
         return
 
-    text = (
-        f"💰 کیف پول شما\n\n"
-        f"👛 موجودی قابل استفاده: {user['wallet']:,} تومان\n"
-        f"🔒 موجودی در انتظار: {user['locked_wallet']:,} تومان\n\n"
-        f"ℹ️ موجودی در انتظار، پس از خرید حجم {REFERRAL_MIN_VOLUME_GB} گیگ یا بیشتر توسط فردی که با لینک شما عضو شده، "
-        f"به‌صورت خودکار آزاد می‌شود."
-    )
+    text = t("wallet_overview", wallet=user["wallet"], locked=user["locked_wallet"], min_gb=REFERRAL_MIN_VOLUME_GB)
     await show_menu_with_sticker(message.bot, message.chat.id, "wallet", text, reply_markup=wallet_menu())
 
 
-@router.message(F.text == "👥 دعوت دوستان")
+@router.message(_MenuButtonText("main_referral", "👥 دعوت دوستان"))
 async def menu_referral(message: types.Message, state: FSMContext):
     await state.clear()
     user = db.get_user(message.from_user.id)
     if user is None:
-        await message.answer("ابتدا دستور /start را بزنید.")
+        await message.answer(t("common_start_required"))
         return
 
     stats = db.get_referral_stats(user["id"])
     invite_link = f"https://t.me/{bot_info.get('bot_username')}?start={stats['invite_code']}"
 
-    text = (
-        f"👥 دعوت دوستان و کسب درآمد 💸\n\n"
-        f"دوستانتو دعوت کن و به‌ازای هر دعوت موفق، {REFERRAL_LOCK_AMOUNT:,} تومان پاداش نقدی بگیر! 🎁\n"
-        f"کافیه لینک اختصاصی‌ت رو برای دوستات، گروه‌ها یا کانال‌هایی که توشون عضوی بفرستی.\n\n"
-        f"🔗 لینک اختصاصی شما:\n{invite_link}\n\n"
-        f"🔑 کد اختصاصی: {stats['invite_code']}\n\n"
-        f"👤 تعداد دعوت: {stats['invited_count']}\n"
-        f"✅ دعوت‌های موفق: {stats['successful_invites']}\n"
-        f"🔓 مبلغ آزاد شده: {stats['released_amount']:,} تومان\n"
-        f"🔒 مبلغ در انتظار: {user['locked_wallet']:,} تومان\n\n"
-        f"ℹ️ به‌ازای هر دوستی که با لینک شما عضو شود و یک خرید حجم {REFERRAL_MIN_VOLUME_GB} گیگ یا بیشتر انجام دهد، "
-        f"{REFERRAL_LOCK_AMOUNT:,} تومان به‌صورت خودکار و بدون نیاز به هیچ اقدام دیگری به کیف پول شما آزاد می‌شود. "
-        f"(تست رایگان و خریدهای کمتر از {REFERRAL_MIN_VOLUME_GB} گیگ پاداش را آزاد نمی‌کنند)\n\n"
-        f"⚠️ لطفاً فقط لینک را برای افراد واقعی ارسال کنید؛ استفاده از اکانت‌های فیک تقلب "
-        f"محسوب شده و جایزه شما لغو می‌شود."
-    )
+    text = t("referral_overview", reward=REFERRAL_LOCK_AMOUNT, min_gb=REFERRAL_MIN_VOLUME_GB, invite_link=invite_link, invite_code=stats["invite_code"], invited_count=stats["invited_count"], successful_invites=stats["successful_invites"], released=stats["released_amount"], locked=user["locked_wallet"])
     await show_menu_with_sticker(message.bot, message.chat.id, "referral", text, reply_markup=referral_menu())
 
 
-@router.message(F.text == "👤 پروفایل من")
+@router.message(_MenuButtonText("main_profile", "👤 پروفایل من"))
 async def menu_profile(message: types.Message, state: FSMContext):
     await state.clear()
     user = db.get_user(message.from_user.id)
     if user is None:
-        await message.answer("ابتدا دستور /start را بزنید.")
+        await message.answer(t("common_start_required"))
         return
 
     configs_count = len(db.get_configs(user["id"]))
 
-    text = (
-        f"👤 پروفایل حرفه‌ای شما\n\n"
-        f"📛 نام: {user['name']}\n"
-        f"🆔 آیدی: {user['telegram_id']}\n\n"
-        f"👛 موجودی قابل استفاده: {user['wallet']:,} تومان\n"
-        f"🔒 موجودی در انتظار: {user['locked_wallet']:,} تومان\n\n"
-        f"📦 تعداد سرویس: {configs_count}\n"
-        f"🛒 کل خرید: {user['total_purchase']:,} تومان\n"
-        f"📅 تاریخ عضویت: {user['joined']}\n\n"
-        f"👥 تعداد دعوت: {user['invited_count']} | دعوت موفق: {user['successful_invites']}"
-    )
+    text = t("profile_overview", name=user["name"], telegram_id=user["telegram_id"], wallet=user["wallet"], locked=user["locked_wallet"], configs_count=configs_count, total_purchase=user["total_purchase"], joined=user["joined"], invited_count=user["invited_count"], successful_invites=user["successful_invites"])
     await show_menu_with_sticker(message.bot, message.chat.id, "profile", text, reply_markup=profile_menu())
 
 
-@router.message(F.text == "📚 راهنما")
+@router.message(_MenuButtonText("main_guides", "📚 راهنما"))
 async def menu_user_guides(message: types.Message, state: FSMContext):
     await state.clear()
     guides = db.get_guides()
     if not guides:
         await show_menu_with_sticker(
             message.bot, message.chat.id, "guides_empty",
-            "📚 راهنما و اموزش‌ها\n\nهنوز هیچ راهنمایی ثبت نشده. به‌زودی محتوای آموزشی اینجا قرار می‌گیرد.",
+            t("guides_empty"),
             reply_markup=back_button("back", "🏠 بازگشت به منوی اصلی"),
         )
         return
     await show_menu_with_sticker(
         message.bot, message.chat.id, "guides_has",
-        "📚 راهنما و اموزش‌ها\n\nیکی از موارد زیر را برای مشاهده انتخاب کنید 👇",
+        t("guides_intro"),
         reply_markup=user_guides_menu(guides),
     )
 
@@ -242,7 +238,7 @@ async def menu_user_guides_callback(callback: types.CallbackQuery):
         await callback.answer()
         return
     await show_menu_with_sticker(callback.bot, callback.message.chat.id, "guides_has", 
-        "📚 راهنما و اموزش‌ها\n\nیکی از موارد زیر را برای مشاهده انتخاب کنید 👇",
+        t("guides_intro"),
         reply_markup=user_guides_menu(guides),
     )
     await callback.answer()
@@ -253,50 +249,52 @@ async def menu_user_guide_open(callback: types.CallbackQuery):
     guide_id = int(callback.data.replace("guideopen_", ""))
     guide = db.get_guide(guide_id)
     if guide is None:
-        await callback.answer("❌ این راهنما دیگر موجود نیست.", show_alert=True)
+        await callback.answer(t("guide_missing"), show_alert=True)
         return
 
     caption = f"📚 {guide['title']}"
     if guide.get("body_text"):
         caption += f"\n\n{guide['body_text']}"
 
+    # 🆕 فیکس: متن راهنماها ممکنه شامل لینک باشد (مثلاً لینک دانلود اپلیکیشن). برای اینکه
+    # تلگرام پیش‌نمایش بزرگ لینک (عکس/عنوان/توضیح) را زیر پیام راهنما نشان ندهد، برای هیچ
+    # لینکی داخل متن راهنما (نه فقط لینک V2box)، پیش‌نمایش لینک غیرفعال می‌شود.
+    no_link_preview = types.LinkPreviewOptions(is_disabled=True)
     try:
         if guide["content_type"] == "photo" and guide.get("file_id"):
             await callback.message.answer_photo(guide["file_id"], caption=caption, reply_markup=user_guide_detail_keyboard())
         elif guide["content_type"] == "video" and guide.get("file_id"):
             await callback.message.answer_video(guide["file_id"], caption=caption, reply_markup=user_guide_detail_keyboard())
         else:
-            await callback.message.answer(caption, reply_markup=user_guide_detail_keyboard())
+            await callback.message.answer(caption, reply_markup=user_guide_detail_keyboard(), link_preview_options=no_link_preview)
     except Exception:
-        await callback.message.answer(caption, reply_markup=user_guide_detail_keyboard())
+        await callback.message.answer(caption, reply_markup=user_guide_detail_keyboard(), link_preview_options=no_link_preview)
     await callback.answer()
 
 
-@router.message(F.text == "👨‍💻 پشتیبانی")
+@router.message(_MenuButtonText("main_support", "👨‍💻 پشتیبانی"))
 async def menu_ticket(message: types.Message, state: FSMContext):
     await state.clear()
     try:
         await show_menu_with_sticker(
             message.bot, message.chat.id, "support",
-            "👨‍💻 پشتیبانی\n\nمی‌تونی مستقیم تیکت بزنی یا از کانال اصلی و پشتیبان استفاده کنی 👇",
+            t("support_intro"),
             reply_markup=support_menu(),
         )
     except Exception:
         logging.getLogger(__name__).exception("خطا در نمایش منوی پشتیبانی")
         await message.answer(
-            "❌ خطایی در نمایش منوی پشتیبانی پیش آمد (احتمالاً لینک پشتیبانی در تنظیمات نامعتبر است). لطفاً دوباره تلاش کنید یا به ادمین اطلاع بدهید.",
-            reply_markup=main_reply_keyboard(),
+            t("support_error"),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
 
 
-@router.message(F.text == "🤝 درخواست نمایندگی")
+@router.message(_MenuButtonText("main_agency", "🤝 درخواست نمایندگی"))
 async def menu_agency_request_start(message: types.Message, state: FSMContext):
     await state.clear()
     await show_menu_with_sticker(
         message.bot, message.chat.id, "agency_request",
-        "🤝 درخواست نمایندگی\n\n"
-        "درخواست و مشخصات خودتون (اسم، شماره تماس، میزان فعالیت/تعداد مشتری تقریبی و توضیحات) "
-        "رو در یک پیام بنویسید و ارسال کنید؛ مستقیم برای پشتیبانی فرستاده می‌شه و به‌زودی بررسی و پاسخ داده می‌شه 👇",
+        t("agency_intro"),
         reply_markup=back_button("back", "🔙 انصراف"),
     )
     await state.set_state(UserStates.waiting_agency_request_message)
@@ -307,7 +305,7 @@ async def menu_agency_request_send(message: types.Message, state: FSMContext):
     uid = str(message.from_user.id)
     text = (message.text or "").strip()
     if not text:
-        await message.answer("❌ لطفاً درخواستتون رو به‌صورت متن ارسال کنید:")
+        await message.answer(t("agency_invalid"))
         return
 
     await message.bot.send_message(
@@ -315,8 +313,8 @@ async def menu_agency_request_send(message: types.Message, state: FSMContext):
         f"🤝 درخواست نمایندگی جدید\n👤 {message.from_user.full_name}\n🆔 {uid}\n\n💬 {text}",
     )
     await message.answer(
-        "✅ درخواست شما برای پشتیبانی ارسال شد. به‌زودی بررسی و باهاتون تماس گرفته می‌شه.",
-        reply_markup=main_reply_keyboard(),
+        t("agency_sent"),
+        reply_markup=get_main_keyboard(message.from_user.id),
     )
     await state.clear()
 
@@ -350,7 +348,7 @@ async def menu_admin_userlist(message: types.Message, state: FSMContext):
         f"👥 مدیریت کاربران\n\n"
         f"👥 کل کاربران ثبت‌نامی: {db.count_users()}\n"
         f"🟢 مشتریانی که خرید داشته‌اند: {db.count_customers()}\n\n"
-        f"یکی از گزینه‌های زیر را انتخاب کنید 👇"
+        f"یکی از گزینه‌های زیر را ان��خاب کنید 👇"
     )
     await message.answer(text, reply_markup=admin_userlist_menu())
 
