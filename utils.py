@@ -11,10 +11,25 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram.types import FSInputFile
+from aiogram.exceptions import TelegramBadRequest
 
 from keyboards import main_reply_keyboard
+import database as db
 
 logger = logging.getLogger(__name__)
+
+
+def get_main_keyboard(user_id):
+    """منوی دائمی پایین صفحه را برمی‌گرداند — مگر اینکه برای این کاربر
+    قبلاً بعد از تحویل یک سرویس (با set_keyboard_hidden(True)) مخفی شده باشد،
+    که در این صورت None برمی‌گردد (یعنی منوی پایین صفحه دوباره فرستاده نمی‌شود).
+    تنها جایی که منو باید قطعاً دوباره نمایش داده شود (go_back در handlers/start.py) مستقیماً از main_reply_keyboard() استفاده می‌کند و پرچم را پاک می‌کند."""
+    try:
+        if db.is_keyboard_hidden(user_id):
+            return None
+    except Exception:
+        logger.exception("خطا در بررسی وضعیت مخفی‌بودن منوی پایین صفحه")
+    return main_reply_keyboard()
 
 # سرور ربات (Render) با ساعت UTC کار می‌کند و همه‌ی رشده‌های زمانی ذخیره‌شده در
 # دیتابیس (created_at/expires_at و ...) بر همین اساس هستند؛ برای اینکه چیزی که
@@ -191,8 +206,7 @@ STICKERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sticker
 STICKER_FILES = {
     "free_test": "test.webm",       # دکمه‌ی «🎁 تست رایگان»
     "buy_plans": "service.webm",    # دکمه‌ی «🛒 خرید اشتراک»
-    "plan_select": "plan.webm",     # دکمه‌ی «🚀 سرور VIP» یا «🌐 سرور Gaming»
-    "custom_build": "make.webm",    # دکمه‌ی «🚀 کانفیگ خودتو بساز»
+    "plan_select": "plan.webm",     # دکمه‌ی «🚀 سرور VIP»
 }
 
 # عنوان فارسی قابل‌نمایش هر بخش، برای استفاده در پنل مدیریت استیکرها (handlers/admin.py).
@@ -201,8 +215,7 @@ STICKER_SECTION_LABELS = {
     "join_confirmed": "✅ تایید عضویت در کانال‌ها",
     "free_test": "🎁 تست رایگان",
     "buy_plans": "🛒 خرید اشتراک",
-    "plan_select": "🚀 انتخاب پلن VIP / Gaming",
-    "custom_build": "🛠 بساز کانفیگ خودت",
+    "plan_select": "🚀 انتخاب پلن VIP",
     "my_configs_empty": "📱 سرویس‌های من (بدون سرویس)",
     "my_configs_has": "📱 سرویس‌های من (دارای سرویس)",
     "wallet": "💰 کیف پول",
@@ -213,7 +226,6 @@ STICKER_SECTION_LABELS = {
     "support": "👨‍💻 پشتیبانی",
     "agency_request": "🤝 درخواست نمایندگی",
     "vip_category_list": "🚀 ليست پلان‌های دسته VIP",
-    "gaming_category_list": "🌐 ليست پلان‌های دسته Gaming",
     "discount_code_entry": "🎟 ورود کد تخفیف",
     "my_configs_list_empty": "📋 ليست سرویس‌های یک دسته (خالی)",
     "my_configs_list_has": "📋 ليست سرویس‌های یک دسته (دارای سرویس)",
@@ -229,10 +241,6 @@ STICKER_SECTION_LABELS = {
     "plan_pay_wallet": "👛 پرداخت با کیف پول (خرید پلن)",
     "plan_pay_online": "🌐 پرداخت آنلاین (خرید پلن)",
     "plan_pay_card": "💳 پرداخت کارت‌به‌کارت (خرید پلن)",
-    "cbuild_payment_method": "💳 انتخاب روش پرداخت (بساز کانفیگ خودت)",
-    "cbuild_pay_wallet": "👛 پرداخت با کیف پول (بساز کانفیگ خودت)",
-    "cbuild_pay_online": "🌐 پرداخت آنلاین (بساز کانفیگ خودت)",
-    "cbuild_pay_card": "💳 پرداخت کارت‌به‌کارت (بساز کانفیگ خودت)",
     "walletcharge_method": "💳 انتخاب روش شارژ کیف پول",
     "walletcharge_pay_card": "💳 شارژ با کارت‌به‌کارت",
     "walletcharge_pay_online": "🌐 شارژ آنلاین کیف پول",
@@ -310,11 +318,8 @@ async def show_menu_with_sticker(
     مقدار None باشد، فقط پیام منو (بدون استیکر جدید) فرستاده می‌شود؛ برای مرحله‌هایی
     که نباید استیکری در آن‌ها نمایش داده شود (مثلاً مرحله‌ی نهایی انتخاب/انجام پرداخت).
     """
-    prev = _last_sticker_menu.pop(chat_id, None)
-    if prev:
-        old_ids = [mid for mid in (prev.get("sticker_msg_id"), prev.get("menu_msg_id")) if mid]
-        if old_ids:
-            asyncio.create_task(_delete_messages_in_background(bot, chat_id, old_ids))
+    # منوی قبلی حذف نمی‌شود.
+    prev = _last_sticker_menu.get(chat_id)
 
     new_sticker_msg_id = None
     if sticker_key:
@@ -345,7 +350,7 @@ async def show_menu_with_sticker(
                         sticker_source = ("path", candidate_path)
 
         if sticker_source:
-            sticker_reply_markup = main_reply_keyboard() if show_main_keyboard else None
+            sticker_reply_markup = get_main_keyboard(chat_id) if show_main_keyboard else None
             try:
                 if sticker_source[0] == "file_id":
                     sticker_msg = await bot.send_sticker(
@@ -377,23 +382,20 @@ async def show_menu_with_sticker(
         # 🐛 فیکس: کاراکتر قبلی «⠀» (U+2800 Braille Pattern Blank) توسط تلگرام به‌عنوان متن کاملاً خالی رد می‌شد
         # (خطای دقیق تلگرام: "text must be non-empty")، در نتیجه این پیام نامرئی هرگز ارسال نمی‌شد و منوی دائمی
         # پایین صفحه (وقتی استیکری فرستاده نمی‌شود) دوباره تازه نمی‌شد. به جایش از "⠀"، از "ㅤ"
-        # (U+3164 Hangul Filler) استفاده شد، اما این کاراکتر هم توسط سرورهای تلگرام نرمال‌سازی/حذف
-        # می‌شود و باز همان خطای "MESSAGE_EMPTY" رخ می‌داد (تلگرام انواع کاراکترهای فاصله‌مانند و
-        # نامرئیِ رایج مثل U+2800 و U+3164 و zero-width space را به‌عنوان پیام خالی رد می‌کند).
-        # 🐛 فیکس نهایی: نقطه‌ی وسط ("·" U+00B7) قبلی هرچند دیگر خطای MESSAGE_EMPTY نمی‌داد، ولی
-        # چون یک نویسه‌ی چاپی واقعی بود، به‌صورت یک پیام مجزا و قابل‌مشاهده («یک نقطه‌ی تنها»)
-        # در چت کاربر دیده می‌شد؛ درست همان چیزی که این تابع قرار بود از دید کاربر مخفی نگه دارد.
-        # به‌جای آن از نیم‌فاصله‌ی فارسی ("‌" U+200C Zero Width Non-Joiner) استفاده می‌شود: این
-        # کاراکتر یک نویسه‌ی «قالب‌بندی» بدون هیچ گلیف قابل‌رویتی است (کاملاً نامرئی)، ولی برخلاف
-        # فاصله‌های نامرئیِ معمولی (مثل zero-width space) در متن‌های فارسی واقعی هم به‌کرات به‌کار
-        # می‌رود، پس بعید است سرور تلگرام آن را هم‌ردیف فاصله‌ی خالی حذف/رد کند.
+        # (U+3164 Hangul Filler) استفاده می‌شود: دقیقاً مثل قبل برای چشم کاربر کاملاً خالی/نامرئی است، ولی
+        # چون یک حرف واقعی (نه کاراکتر جداکننده/فضای‌خالی) است، تلگرام آن را خالی تلقی نمی‌کند.
         try:
-            invisible_msg = await bot.send_message(chat_id, "\u200c", reply_markup=main_reply_keyboard())
+            invisible_msg = await bot.send_message(chat_id, "ㅤ", reply_markup=get_main_keyboard(chat_id))
             new_sticker_msg_id = invisible_msg.message_id
         except Exception:
             logger.exception("خطا در ارسال پیام نامرئی تازه‌سازی منوی پایین صفحه")
 
-    menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    try:
+        menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except TelegramBadRequest:
+        # 🆕 فیکس: اگر متن (مثلاً متن سفارشی ویرایش کارت که ادمین از پنل ویرایش کرده) شامل کاراکترهای خاص HTML/Markdown نامعتبر (مثلاً < یا > تکی بدون بسته شدن) باشد و تلگرام نتواند پارسش کند، تلاش برای ارسال مجدد نمی‌شود و کاربر اصلاً منوی را دریافت نمی‌کرد، پس به‌جای شکست کامل، همان متن بدون هیچ قالب‌بندی (parse_mode=None) دوباره فرستاده می‌شود (مونواسپیس و سایر تگ‌ها/ستاره‌ها اینجا به‌صورت متن خام نمایش داده می‌شوند).
+        logger.exception("خطا در ارسال پیام منو با parse_mode='%s'، دوباره بدون فرمت ارسال می‌شود", parse_mode)
+        menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=None)
     _last_sticker_menu[chat_id] = {"sticker_msg_id": new_sticker_msg_id, "menu_msg_id": menu_msg.message_id}
     return menu_msg
 
