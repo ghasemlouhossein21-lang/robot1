@@ -23,6 +23,21 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TEXT_LIMIT = 4096
 
 
+def truncate_for_telegram(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
+    """اگر متن از سقف مجاز طول پیام تلگرام بیشتر باشد، آن را کوتاه می‌کند و یک یادداشت کوتاه به انتهایش اضافه می‌کند؛ در غیر این‌صورت متن بدون تغییر برمی‌گردد. هر جایی که احتمال ارسال یک متن طولانی/قابل‌ویرایش (مثلاً پیام خوش‌آمدگویی یا هر متن دیگری که ادمین از پنل ویرایش کرده) وجود دارد، باید قبل از ارسال از این تابع استفاده کند (نه فقط در show_menu_with_sticker)."""
+    if text is None:
+        return text
+    if len(text) <= limit:
+        return text
+    suffix = "\n\n… (متن به‌دلیل محدودیت طول پیام تلگرام کوتاه شد)"
+    return text[: limit - len(suffix)] + suffix
+
+
+def is_message_too_long_error(exc: Exception) -> bool:
+    """تشخیص می‌دهد که آیا یک TelegramBadRequest دقیقاً از نوع «MESSAGE_TOO_LONG» است (و مثلاً یک خطای مربوط به parse mode نیست)؛ تا همه‌جا یکسان تشخیص داده شود."""
+    return "message is too long" in str(exc).lower()
+
+
 def get_main_keyboard(user_id):
     """منوی دائمی پایین صفحه را برمی‌گرداند — مگر اینکه برای این کاربر
     قبلاً بعد از تحویل یک سرویس (با set_keyboard_hidden(True)) مخفی شده باشد،
@@ -398,12 +413,11 @@ async def show_menu_with_sticker(
         menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
     except TelegramBadRequest as e:
         # 🆕 فیکس: اگر متنی که ادمین از پنل ویرایش کرده (مثلاً پیام خوش‌آمدگویی /start یا هر متن قابل‌ویرایش دیگری) از سقف مجاز تلگرام برای متن پیام (۴۰۹۶ کاراکتر) بلندتر باشد، تلگرام خطای «Bad Request: MESSAGE_TOO_LONG» برمی‌گرداند و قبلاً هیچ‌وقت دوباره تلاشی نمی‌شد (چون فقط حالت parse_mode دست‌کاری می‌شد)؛ برای کاربرانی که تازه روی /start می‌زدند (بیشتر از همه کاربران جدید) کل منوی /start با ارور مواجه می‌شد. حالا اگر خطا دقیقاً همین باشد، متن کوتاه شده دوباره فرستاده می‌شود تا کاربر هیچ‌وقت با خطا مواجه نشود.
-        if "message is too long" in str(e).lower():
+        if is_message_too_long_error(e):
             logger.error(
                 "متن منو (پیش‌نمایش %d کاراکتر) از سقف تلگرام (۴۰۹۶) بیشتر بود؛ کوتاه شد و دوباره فرستاده شد.", len(text),
             )
-            suffix = "\n\n… (متن به‌دلیل محدودیت طول پیام تلگرام کوتاه شد)"
-            safe_text = text[: TELEGRAM_TEXT_LIMIT - len(suffix)] + suffix
+            safe_text = truncate_for_telegram(text)
             try:
                 menu_msg = await bot.send_message(chat_id=chat_id, text=safe_text, reply_markup=reply_markup, parse_mode=parse_mode)
             except TelegramBadRequest:
