@@ -25,7 +25,7 @@ import database as db
 import crypto
 import alerts
 from subscription import extract_meta, days_remaining, format_bytes, usage_bar, fetch_subscription_info, format_expire
-from utils import parse_int_in_range, is_duplicate_action, now_tehran_naive, STICKER_SECTION_LABELS, STICKER_FILES, STICKERS_DIR, invalidate_section_sticker_cache, send_notification_sticker, clean_numeric_id
+from utils import parse_int_in_range, is_duplicate_action, now_tehran_naive, STICKER_SECTION_LABELS, STICKER_FILES, STICKERS_DIR, invalidate_section_sticker_cache, send_notification_sticker, clean_numeric_id, TELEGRAM_TEXT_LIMIT, truncate_for_telegram, is_message_too_long_error
 from states import AdminStates, UserStates
 import bot_info
 import payments
@@ -566,14 +566,29 @@ async def admin_error_log_detail(callback: types.CallbackQuery):
     if log is None:
         await callback.answer("❌ یافت نشد.", show_alert=True)
         return
-    tb = html.escape(str(log.get("traceback") or "")[:3500])
-    text = (
-        f"⚠️ {html.escape(str(log['error_type']))}\n"
-        f"🕐 {html.escape(str(log.get('occurred_at') or ''))}\n\n"
-        f"📝 {html.escape(str(log.get('message') or ''))}\n\n"
-        f"<pre>{tb}</pre>"
+    # 🆕 فیکس: قبلاً پیام خطا جداگانه از یک طول ثابت (message تا ۲۰۰۰ کاراکتر + traceback تا ۳۵۰۰ کاراکتر) ساخته می‌شد؛ اگر خطایی با پیام (message) طولانی ثبت می‌شد (مثلاً همین خطای «MESSAGE_TOO_LONG»)، مجموع این دو می‌توانست از سقف تلگرام (۴۰۹۶) رد شود و خود صفحه‌ی «لاگ خطاها» هم با همان خطا مواجه می‌شد و ادمین اصلاً نمی‌توانست جزئیات را ببیند. حالا طول قابل‌نمایش traceback پویا بر اساس طول واقعی بقیه محاسبه می‌شود تا مجموع همیشه زیر سقف تلگرام بماند، و بازهم یک try/except محافظتی اضافه شده تا اگر بازهم محاسبه جایی کم بیافتاد، پیام با یک نسخه‌ی کاملاً مختصر‌شده بازهم فرستاده شود تا این بخش از پنل ادمین هرگز با ارور متوقف نشود.
+    error_type_display = html.escape(str(log["error_type"]))
+    occurred_at_display = html.escape(str(log.get("occurred_at") or ""))
+    message_display = html.escape(str(log.get("message") or "")[:300])
+    header = (
+        f"⚠️ {error_type_display}\n"
+        f"🕐 {occurred_at_display}\n\n"
+        f"📝 {message_display}\n\n"
     )
-    await callback.message.edit_text(text, reply_markup=admin_error_log_detail_keyboard())
+    wrapper_len = len("<pre></pre>")
+    max_tb_len = max(TELEGRAM_TEXT_LIMIT - len(header) - wrapper_len - 20, 200)
+    tb = html.escape(str(log.get("traceback") or "")[:max_tb_len])
+    text = f"{header}<pre>{tb}</pre>"
+    try:
+        await callback.message.edit_text(text, reply_markup=admin_error_log_detail_keyboard())
+    except TelegramBadRequest as e:
+        if is_message_too_long_error(e):
+            fallback_text = truncate_for_telegram(
+                f"⚠️ {error_type_display}\n🕐 {occurred_at_display}\n\n📝 {message_display}"
+            )
+            await callback.message.edit_text(fallback_text, reply_markup=admin_error_log_detail_keyboard())
+        else:
+            raise
     await callback.answer()
 
 
@@ -988,7 +1003,7 @@ async def approve_purchase(callback: types.CallbackQuery):
     try:
         _discount_note = f"\n🎟 کد تخفیف {pending['discount_code']} برای این خرید مصرف شد." if pending and pending.get("discount_code") else ""
         _confirm_text = user_text("notif_purchase_approved", plan_name=plan["name"], discount_note=_discount_note)
-        # fix: به کاربر بگوییم کد تخفیفش همین تأیید مصرف شده تا گیج نشود چرا دیگر قابل‌استفاده نیست.
+        # fix: به کاربر بگوییم کد تخفیف همین تأیید مصرف شده تا گیج نشود چرا دیگر قابل‌استفاده نیست.
         if pending and pending.get("discount_code"):
             _confirm_text += f"\n🎟 کد تخفیف {pending['discount_code']} برای این خرید مصرف شد."
         await send_notification_sticker(callback.bot, int(uid), "notif_purchase_approved")
