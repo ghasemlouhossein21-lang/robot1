@@ -12,9 +12,11 @@ from aiogram import Router, F, types
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramBadRequest
 
 import database as db
-from utils import show_menu_with_sticker
+from text_catalog import text as t
+from utils import show_menu_with_sticker, get_main_keyboard, truncate_for_telegram, is_message_too_long_error
 from keyboards import (
     join_channels_keyboard,
     main_reply_keyboard,
@@ -127,7 +129,7 @@ async def start(message: types.Message, command: CommandObject, state: FSMContex
         # دائمی پایین صفحه زودتر از موعد فعال شود.
         await show_menu_with_sticker(
             message.bot, message.chat.id, "start_welcome",
-            "⚠️ برای استفاده از ربات ابتدا در کانال‌های زیر عضو شوید:",
+            t("start_join_required"),
             reply_markup=join_channels_keyboard(not_joined),
             show_main_keyboard=False,
         )
@@ -136,7 +138,7 @@ async def start(message: types.Message, command: CommandObject, state: FSMContex
         return
 
     if db.is_user_blocked(user_id):
-        await message.answer("🚫 دسترسی شما به ربات مسدود شده است. در صورت وجود ابهام با پشتیبانی در ارتباط باشید.")
+        await message.answer(t("start_blocked"))
         return
 
     data = await state.get_data()
@@ -150,14 +152,14 @@ async def start(message: types.Message, command: CommandObject, state: FSMContex
 
     if _is_admin(user_id):
         await message.answer(
-            "👨‍💻 به پنل مدیریت خوش آمدید!\n\nهمه‌ی امکانات مدیریتی از منوی پایین صفحه قابل دسترسی است ✅",
+            t("start_admin_welcome"),
             reply_markup=_admin_reply_kb_for(user_id),
         )
         return
 
     await show_menu_with_sticker(
         message.bot, message.chat.id, "start_welcome",
-        _welcome_text(message.from_user.first_name), reply_markup=main_reply_keyboard(),
+        _welcome_text(message.from_user.first_name), reply_markup=get_main_keyboard(message.from_user.id),
     )
 
 
@@ -167,13 +169,13 @@ async def check_join(callback: types.CallbackQuery, state: FSMContext):
     debug = [] if _is_admin(callback.from_user.id) else None
     not_joined = await check_membership(callback.bot, callback.from_user.id, debug=debug)
     if not_joined:
-        await callback.answer("❌ هنوز در همه کانال‌ها عضو نشدید!", show_alert=True)
+        await callback.answer(t("start_join_not_done"), show_alert=True)
         if debug:
             await callback.message.answer("🔎 دیباگ عضویت (فقط ادمین می‌بیند):\n" + "\n".join(debug))
         return
 
     if db.is_user_blocked(callback.from_user.id):
-        await callback.message.edit_text("🚫 دسترسی شما به ربات مسدود شده است.")
+        await callback.message.edit_text(t("start_blocked_short"))
         await callback.answer()
         return
 
@@ -191,10 +193,19 @@ async def check_join(callback: types.CallbackQuery, state: FSMContext):
         await callback.message.edit_text("👨‍💻 به پنل مدیریت خوش آمدید! همه‌ی امکانات مدیریتی از منوی پایین صفحه قابل دسترسی است ✅")
         await callback.message.answer("منوی مدیریتی فعال شد:", reply_markup=_admin_reply_kb_for(callback.from_user.id))
     else:
-        await callback.message.edit_text(_welcome_text(callback.from_user.first_name))
+        # 🆕 فیکس: این مسیر (تأیید عضویت پس از عضو کانال‌ها) مستقیماً با edit_text فرستاده می‌شد و از محافظتی که در show_menu_with_sticker اضافه شده بود عبور نمی‌کرد، پس اگر متن خوش‌آمدگویی (welcome_text) توسط ادمین طولانی ذخیره می‌شد، همینجا هم تلگرام خطای «MESSAGE_TOO_LONG» برمی‌گرداند و کاربر بعد از تأیید عضویت هم با ارور مواجه می‌شد (دقیقاً همان اروری که گزارش شد). حالا اگر این خطا رخ بدهد، متن کوتاه‌شده دوباره فرستاده می‌شود.
+        welcome_text = _welcome_text(callback.from_user.first_name)
+        try:
+            await callback.message.edit_text(welcome_text)
+        except TelegramBadRequest as e:
+            if is_message_too_long_error(e):
+                logger.error("متن خوش‌آمدگویی (پیش‌نمایش %d کاراکتر) در check_join از سقف تلگرام بیشتر بود؛ کوتاه شد و دوباره فرستاده شد.", len(welcome_text))
+                await callback.message.edit_text(truncate_for_telegram(welcome_text))
+            else:
+                raise
         await show_menu_with_sticker(
             callback.bot, callback.message.chat.id, "join_confirmed",
-            "منوی اصلی در پایین صفحه فعال شد ✅", reply_markup=main_reply_keyboard(),
+            t("start_join_confirmed"), reply_markup=get_main_keyboard(callback.from_user.id),
         )
     await callback.answer()
 
@@ -209,11 +220,16 @@ async def go_back(callback: types.CallbackQuery):
     می‌شود تا همزمان با بستن منو، استیکرش هم حذف شود و منوی دائمی پایین صفحه
     هم دوباره تازه/فعال شود."""
     if _is_admin(callback.from_user.id):
-        await callback.message.edit_text("👨‍💻 بازگشت به منوی اصلی — از منوی پایین صفحه ادامه دهید ✅")
+        await callback.message.edit_text(t("start_back_admin"))
     else:
+        # ✅ تنها مسیر مجاز برای بازگرداندن منوی دائمی پایین صفحه پس از مخفی‌شدن موقت (بعد از تحویل سرویس): همین‌جا صریحاً flag را پاک می‌کنیم و بدون وابستگی به get_main_keyboard مستقیماً main_reply_keyboard() را می‌فرستیم.
+        try:
+            db.set_keyboard_hidden(callback.from_user.id, False)
+        except Exception:
+            logging.getLogger(__name__).exception("خطا در پاک‌کردن وضعیت مخفی‌بودن منوی پایین صفحه")
         await show_menu_with_sticker(
             callback.bot, callback.message.chat.id, None,
-            "👋 بازگشت به منوی اصلی — از منوی پایین صفحه ادامه دهید ✅",
+            t("start_back_user"),
             reply_markup=main_reply_keyboard(),
         )
     await callback.answer()
@@ -221,5 +237,5 @@ async def go_back(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "free_test_soon")
 async def free_test_soon(callback: types.CallbackQuery):
-    await callback.answer("🎁 تست رایگان به‌زودی فعال می‌شود! منتظر باشید.", show_alert=True)
+    await callback.answer(t("free_test_soon"), show_alert=True)
 
