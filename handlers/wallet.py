@@ -4,19 +4,53 @@ handlers/wallet.py
 و فرایند شارژ کیف پول (انتخاب مبلغ یا مبلغ دلخواه + ارسال رسید).
 """
 
+import html
 import logging
 
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 
 import database as db
+from text_catalog import text as t
 import uniquepay
 import payments
 import alerts
 from utils import send_admin_task_message, forward_admin_task_message, is_duplicate_action, format_deadline_time, progress_bar, clean_numeric_id
-from utils import send_admin_task_message, forward_admin_task_message, show_menu_with_sticker
+from utils import send_admin_task_message, forward_admin_task_message, show_menu_with_sticker, get_main_keyboard
 from states import UserStates
 import bot_info
+
+
+WALLET_CARD_INVOICE_DEFAULT = (
+    "🟩⬜️ مرحله 2 از 2\n\n"
+    "💳 شارژ کیف پول\n\n"
+    "💰 مبلغ قابل پرداخت: {amount:,} تومان\n\n"
+    "💳 شماره کارت:\n{card_number}\n\n"
+    "👤 به نام: {card_holder}\n\n"
+    "📸 پس از واریز، عکس رسید پرداخت را همینجا ارسال کنید."
+)
+
+
+def _render_wallet_card_invoice_text(deadline_str: str, amount: int) -> str:
+    template = db.get_text_override("invoice_wallet_card", WALLET_CARD_INVOICE_DEFAULT)
+    values = {
+        "amount": amount,
+        # 🆕 فیکس: شماره کارت داخل تگ <code> قرار می‌گیرد تا در تلگرام به‌صورت مونواسپیس
+        # نمایش داده شود و با یک لمس ساده قابل کپی باشد (همراه با parse_mode="HTML" در محل ارسال).
+        "card_number": f"<code>{html.escape(bot_info.get('card_number') or '')}</code>",
+        "card_holder": html.escape(bot_info.get("card_holder") or ""),
+    }
+    try:
+        body = template.format_map(values)
+    except (KeyError, ValueError, IndexError):
+        body = WALLET_CARD_INVOICE_DEFAULT.format_map(values)
+    expiry = (
+        f"⏱ این شماره کارت و مبلغ تا ساعت {deadline_str} (۳۰ دقیقه) معتبر است. "
+        "لطفاً تا این ساعت رسید پرداخت را ارسال کنید، وگرنه این فاکتور به‌طور خودکار منقضی و حذف می‌شود."
+    )
+    return f"{body}\n\n{expiry}"
+
+
 from config import (
     ADMIN_ID,
     REFERRAL_MIN_VOLUME_GB,
@@ -50,16 +84,10 @@ def _get_user_row(telegram_id):
 async def wallet_overview(callback: types.CallbackQuery):
     user = _get_user_row(callback.from_user.id)
     if user is None:
-        await callback.answer("ابتدا دستور /start را بزنید.", show_alert=True)
+        await callback.answer(t("common_start_required"), show_alert=True)
         return
 
-    text = (
-        f"💰 کیف پول شما\n\n"
-        f"💰 موجودی قابل استفاده: {user['wallet']:,} تومان\n"
-        f"🔒 موجودی در انتظار: {user['locked_wallet']:,} تومان\n\n"
-        f"ℹ️ موجودی در انتظار، پس از خرید حجم {REFERRAL_MIN_VOLUME_GB} گیگ یا بیشتر توسط فردی که با لینک شما عضو شده، "
-        f"به‌صورت خودکار آزاد می‌شود."
-    )
+    text = t("wallet_overview", wallet=user["wallet"], locked=user["locked_wallet"], min_gb=REFERRAL_MIN_VOLUME_GB)
     await show_menu_with_sticker(callback.bot, callback.message.chat.id, "wallet", text, reply_markup=wallet_menu())
     await callback.answer()
 
@@ -68,10 +96,10 @@ async def wallet_overview(callback: types.CallbackQuery):
 async def wallet_free(callback: types.CallbackQuery):
     user = _get_user_row(callback.from_user.id)
     if user is None:
-        await callback.answer("ابتدا دستور /start را بزنید.", show_alert=True)
+        await callback.answer(t("common_start_required"), show_alert=True)
         return
-    text = f"💰 موجودی قابل استفاده شما\n\n{user['wallet']:,} تومان\n\nاین مبلغ را می‌توانید برای خرید سرویس استفاده کنید."
-    await show_menu_with_sticker(callback.bot, callback.message.chat.id, "wallet_free", text, reply_markup=back_button("profile", "🔙 بازگشت"))
+    text = t("wallet_free_overview", wallet=user["wallet"])
+    await show_menu_with_sticker(callback.bot, callback.message.chat.id, "wallet_free", text, reply_markup=back_button("profile"))
     await callback.answer()
 
 
@@ -79,14 +107,10 @@ async def wallet_free(callback: types.CallbackQuery):
 async def wallet_locked(callback: types.CallbackQuery):
     user = _get_user_row(callback.from_user.id)
     if user is None:
-        await callback.answer("ابتدا دستور /start را بزنید.", show_alert=True)
+        await callback.answer(t("common_start_required"), show_alert=True)
         return
-    text = (
-        f"🔒 موجودی در انتظار شما\n\n{user['locked_wallet']:,} تومان\n\n"
-        f"این مبلغ از دعوت دوستان به‌دست آمده و پس از خرید حجم {REFERRAL_MIN_VOLUME_GB} گیگ یا بیشتر توسط آن‌ها، "
-        f"به‌صورت خودکار به موجودی قابل‌استفاده شما اضافه می‌شود."
-    )
-    await show_menu_with_sticker(callback.bot, callback.message.chat.id, "wallet_locked", text, reply_markup=back_button("profile", "🔙 بازگشت"))
+    text = t("wallet_locked_overview", locked=user["locked_wallet"], min_gb=REFERRAL_MIN_VOLUME_GB)
+    await show_menu_with_sticker(callback.bot, callback.message.chat.id, "wallet_locked", text, reply_markup=back_button("profile"))
     await callback.answer()
 
 
@@ -94,12 +118,12 @@ async def wallet_locked(callback: types.CallbackQuery):
 async def transactions(callback: types.CallbackQuery):
     user = _get_user_row(callback.from_user.id)
     if user is None:
-        await callback.answer("ابتدا دستور /start را بزنید.", show_alert=True)
+        await callback.answer(t("common_start_required"), show_alert=True)
         return
 
     txs = db.get_transactions(user["id"], limit=10)
     if not txs:
-        text = "📋 هنوز تراکنشی ندارید."
+        text = t("transactions_empty")
     else:
         icon_map = {
             "charge": "✅",
@@ -112,13 +136,13 @@ async def transactions(callback: types.CallbackQuery):
         # که Mini App (منطق جداگانه) استفاده می‌کند تا نمایش
         # تراکنش‌ها بین ربات و Mini App یکسان باشد.
         positive_types = ("charge", "referral_release")
-        text = "📋 تراکنش‌های اخیر:\n\n"
+        text = t("transactions_title")
         for tx in txs:
             icon = icon_map.get(tx["type"], "•")
             sign = "+" if tx["type"] in positive_types else "-"
             text += f"{icon} {tx['description']} | {sign}{tx['amount']:,} تومان | {tx['created_at']}\n"
 
-    await show_menu_with_sticker(callback.bot, callback.message.chat.id, "wallet_transactions", text, reply_markup=back_button("wallet", "🔙 بازگشت"))
+    await show_menu_with_sticker(callback.bot, callback.message.chat.id, "wallet_transactions", text, reply_markup=back_button("wallet"))
     await callback.answer()
 
 
@@ -128,7 +152,7 @@ async def transactions(callback: types.CallbackQuery):
 @router.callback_query(F.data == "charge")
 async def charge(callback: types.CallbackQuery):
     await show_menu_with_sticker(callback.bot, callback.message.chat.id, "wallet_charge", 
-        "💳 مبلغ شارژ را انتخاب کنید:", reply_markup=charge_amount_keyboard()
+        t("charge_choose_amount"), reply_markup=charge_amount_keyboard()
     )
     await callback.answer()
 
@@ -162,17 +186,11 @@ async def _offer_charge_payment_method(target, amount: int, state: FSMContext):
     deadline_str = format_deadline_time(invoice["expires_at"])
     await state.update_data(amount=amount, wallet_card_invoice_id=invoice["id"])
     await state.set_state(UserStates.waiting_charge_receipt)
-    text = (
-        f"💳 مبلغ: {amount:,} تومان\n\n"
-        f"💳 شماره کارت:\n{bot_info.get('card_number')}\n\n"
-        f"👤 {bot_info.get('card_holder')}\n\n"
-        f"📸 عکس رسید را ارسال کنید.\n\n"
-        f"⏱ لطفاً تا ساعت {deadline_str} رسید را ارسال کنید، وگرنه این فاکتور به‌طور خودکار منقضی می‌شود."
-    )
+    text = _render_wallet_card_invoice_text(deadline_str, amount)
     if isinstance(target, types.CallbackQuery):
-        await show_menu_with_sticker(target.bot, target.message.chat.id, "walletcharge_pay_card", text)
+        await show_menu_with_sticker(target.bot, target.message.chat.id, "walletcharge_pay_card", text, parse_mode="HTML")
     else:
-        await show_menu_with_sticker(target.bot, target.chat.id, "walletcharge_pay_card", text)
+        await show_menu_with_sticker(target.bot, target.chat.id, "walletcharge_pay_card", text, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("charge_"))
@@ -181,7 +199,7 @@ async def charge_amount(callback: types.CallbackQuery, state: FSMContext):
 
     if action == "custom":
         await state.set_state(UserStates.waiting_custom_charge)
-        await show_menu_with_sticker(callback.bot, callback.message.chat.id, "wallet_charge", "💵 مبلغ دلخواه را به تومان ارسال کنید:")
+        await show_menu_with_sticker(callback.bot, callback.message.chat.id, "wallet_charge", t("charge_custom_prompt"))
     else:
         amount = int(action)
         await _offer_charge_payment_method(callback, amount, state)
@@ -191,7 +209,7 @@ async def charge_amount(callback: types.CallbackQuery, state: FSMContext):
 @router.message(UserStates.waiting_custom_charge)
 async def custom_charge_amount(message: types.Message, state: FSMContext):
     if not message.text or not clean_numeric_id(message.text).isdigit():
-        await message.answer("❌ فقط عدد ارسال کنید.")
+        await message.answer(t("only_number"))
         return
 
     amount = int(clean_numeric_id(message.text))
@@ -203,7 +221,7 @@ async def charge_pay_with_card(callback: types.CallbackQuery, state: FSMContext)
     try:
         amount = int(callback.data.replace("chargepay_card_", ""))
     except ValueError:
-        await callback.answer("❌ درخواست نامعتبر است.", show_alert=True)
+        await callback.answer(t("invalid_request"), show_alert=True)
         return
 
     invoicing_user = db.get_user(callback.from_user.id)
@@ -217,13 +235,9 @@ async def charge_pay_with_card(callback: types.CallbackQuery, state: FSMContext)
     deadline_str = format_deadline_time(invoice["expires_at"])
     await state.update_data(amount=amount, wallet_card_invoice_id=invoice["id"])
     await state.set_state(UserStates.waiting_charge_receipt)
-    await show_menu_with_sticker(callback.bot, callback.message.chat.id, "walletcharge_pay_card", 
-        progress_bar(1, 2) +
-        f"💳 مبلغ: {amount:,} تومان\n\n"
-        f"💳 شماره کارت:\n{bot_info.get('card_number')}\n\n"
-        f"👤 {bot_info.get('card_holder')}\n\n"
-        f"📸 عکس رسید را ارسال کنید.\n\n"
-        f"⏱ این شماره کارت و مبلغ تا ساعت {deadline_str} (۳۰ دقیقه) معتبر است. لطفاً تا این ساعت رسید پرداخت را ارسال کنید، وگرنه این فاکتور به‌طور خودکار منقضی و حذف می‌شود."
+    await show_menu_with_sticker(callback.bot, callback.message.chat.id, "walletcharge_pay_card",
+        _render_wallet_card_invoice_text(deadline_str, amount),
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -231,41 +245,39 @@ async def charge_pay_with_card(callback: types.CallbackQuery, state: FSMContext)
 @router.callback_query(F.data.startswith("chargepay_online_"))
 async def charge_pay_online(callback: types.CallbackQuery):
     if not UNIQUEPAY_ENABLED:
-        await callback.answer("این روش پرداخت در حال حاضر فعال نیست.", show_alert=True)
+        await callback.answer(t("payment_not_active"), show_alert=True)
         return
 
     try:
         amount = int(callback.data.replace("chargepay_online_", ""))
     except ValueError:
-        await callback.answer("❌ درخواست نامعتبر است.", show_alert=True)
+        await callback.answer(t("invalid_request"), show_alert=True)
         return
 
     if amount <= ONLINE_PAYMENT_MIN_AMOUNT:
         await callback.answer(
-            "❌ برای مبالغ ۵۰ هزار تومان و کمتر امکان استفاده از درگاه پرداخت آنلاین نیست."
-            " لطفاً از کارت‌به‌کارت یا کیف پول استفاده کنید.",
+            t("online_min_amount"),
             show_alert=True,
         )
         return
 
     if is_duplicate_action(f"onlinecharge_{callback.from_user.id}_{amount}"):
-        await callback.answer("⚠️ این درخواست در حال پردازش/ثبت‌شده است.", show_alert=True)
+        await callback.answer(t("processing_request"), show_alert=True)
         return
 
     user = db.get_user(callback.from_user.id)
     if user is None:
-        await callback.answer("ابتدا دستور /start را بزنید.", show_alert=True)
+        await callback.answer(t("common_start_required"), show_alert=True)
         return
 
-    await callback.answer("⏳ در حال ساخت لینک پرداخت...")
+    await callback.answer(t("building_payment"))
 
     hash_id = uniquepay.new_hash_id("charge")
     invoice = await payments.create_invoice(hash_id, amount)
     if invoice is None or not invoice.get("paymentLink"):
         await alerts.report_uniquepay_create_failure(callback.bot, ADMIN_ID)
         await show_menu_with_sticker(callback.bot, callback.message.chat.id, "walletcharge_pay_online", 
-            "❌ برای مبالغ ۵۰ هزار تومان و کمتر امکان استفاده از درگاه پرداخت آنلاین نیست."
-            " لطفاً از کارت‌به‌کارت یا کیف پول استفاده کنید.",
+            t("online_min_amount"),
             reply_markup=charge_payment_method_keyboard(amount),
         )
         return
@@ -341,14 +353,14 @@ async def receive_receipt(message: types.Message, state: FSMContext):
     wallet_card_invoice_id = data.get("wallet_card_invoice_id")
 
     if amount is None:
-        await message.answer(progress_bar(2, 2) + "❌ مشکلی پیش آمد، لطفاً دوباره از منوی شارژ شروع کنید.", reply_markup=main_reply_keyboard())
+        await message.answer(progress_bar(2, 2) + t("charge_problem"), reply_markup=get_main_keyboard(message.from_user.id))
         await state.clear()
         return
 
     if not wallet_card_invoice_id or db.consume_invoice(wallet_card_invoice_id) is None:
         await message.answer(
-            "⏰ مهلت ۳۰ دقیقه‌ای پرداخت این فاکتور به پایان رسیده و به‌طور خودکار منقضی شد. لطفاً دوباره از منوی شارژ شروع کنید.",
-            reply_markup=main_reply_keyboard(),
+            t("charge_receipt_expired"),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         await state.clear()
         return
@@ -373,11 +385,11 @@ async def receive_receipt(message: types.Message, state: FSMContext):
     )
     # 🐛 فیکس: منوی دائمی پایین صفحه‌ی کاربر را صریحاً روی همین پیام تازه می‌کنیم تا بعد از ارسال رسید شارژ
     # منوی کاربر هیچ‌وقت گم نشود.
-    await message.answer("✅ رسید ثبت شد. پس از تأیید ادمین، کیف پول شما شارژ می‌شود.", reply_markup=main_reply_keyboard())
+    await message.answer(t("charge_receipt_registered"), reply_markup=get_main_keyboard(message.from_user.id))
     await state.clear()
 
 
 @router.message(UserStates.waiting_charge_receipt)
 async def receipt_wrong_format(message: types.Message):
     # اگر کاربر به‌جای عکس، متن فرستاد
-    await message.answer("📸 لطفاً عکس رسید پرداخت را ارسال کنید (نه متن).")
+    await message.answer(t("receipt_photo_only"))
