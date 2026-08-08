@@ -18,6 +18,10 @@ import database as db
 
 logger = logging.getLogger(__name__)
 
+# حداکثر طول متن پیام معمولی تلگرام (send_message)؛ اگر متنی از این بیشتر باشد، تلگرام
+# خطای «Bad Request: MESSAGE_TOO_LONG» برمی‌گرداند.
+TELEGRAM_TEXT_LIMIT = 4096
+
 
 def get_main_keyboard(user_id):
     """منوی دائمی پایین صفحه را برمی‌گرداند — مگر اینکه برای این کاربر
@@ -392,10 +396,22 @@ async def show_menu_with_sticker(
 
     try:
         menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except TelegramBadRequest:
-        # 🆕 فیکس: اگر متن (مثلاً متن سفارشی ویرایش کارت که ادمین از پنل ویرایش کرده) شامل کاراکترهای خاص HTML/Markdown نامعتبر (مثلاً < یا > تکی بدون بسته شدن) باشد و تلگرام نتواند پارسش کند، تلاش برای ارسال مجدد نمی‌شود و کاربر اصلاً منوی را دریافت نمی‌کرد، پس به‌جای شکست کامل، همان متن بدون هیچ قالب‌بندی (parse_mode=None) دوباره فرستاده می‌شود (مونواسپیس و سایر تگ‌ها/ستاره‌ها اینجا به‌صورت متن خام نمایش داده می‌شوند).
-        logger.exception("خطا در ارسال پیام منو با parse_mode='%s'، دوباره بدون فرمت ارسال می‌شود", parse_mode)
-        menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=None)
+    except TelegramBadRequest as e:
+        # 🆕 فیکس: اگر متنی که ادمین از پنل ویرایش کرده (مثلاً پیام خوش‌آمدگویی /start یا هر متن قابل‌ویرایش دیگری) از سقف مجاز تلگرام برای متن پیام (۴۰۹۶ کاراکتر) بلندتر باشد، تلگرام خطای «Bad Request: MESSAGE_TOO_LONG» برمی‌گرداند و قبلاً هیچ‌وقت دوباره تلاشی نمی‌شد (چون فقط حالت parse_mode دست‌کاری می‌شد)؛ برای کاربرانی که تازه روی /start می‌زدند (بیشتر از همه کاربران جدید) کل منوی /start با ارور مواجه می‌شد. حالا اگر خطا دقیقاً همین باشد، متن کوتاه شده دوباره فرستاده می‌شود تا کاربر هیچ‌وقت با خطا مواجه نشود.
+        if "message is too long" in str(e).lower():
+            logger.error(
+                "متن منو (پیش‌نمایش %d کاراکتر) از سقف تلگرام (۴۰۹۶) بیشتر بود؛ کوتاه شد و دوباره فرستاده شد.", len(text),
+            )
+            suffix = "\n\n… (متن به‌دلیل محدودیت طول پیام تلگرام کوتاه شد)"
+            safe_text = text[: TELEGRAM_TEXT_LIMIT - len(suffix)] + suffix
+            try:
+                menu_msg = await bot.send_message(chat_id=chat_id, text=safe_text, reply_markup=reply_markup, parse_mode=parse_mode)
+            except TelegramBadRequest:
+                menu_msg = await bot.send_message(chat_id=chat_id, text=safe_text, reply_markup=reply_markup, parse_mode=None)
+        else:
+            # 🆕 فیکس: اگر متن (مثلاً متن سفارشی ویرایش کارت که ادمین از پنل ویرایش کرده) شامل کاراکترهای خاص HTML/Markdown نامعتبر (مثلاً < یا > تکی بدون بسته شدن) باشد و تلگرام نتواند پارسش کند، تلاش برای ارسال مجدد نمی‌شود و کاربر اصلاً منوی را دریافت نمی‌کرد، پس به‌جای شکست کامل، همان متن بدون هیچ قالب‌بندی (parse_mode=None) دوباره فرستاده می‌شود (مونواسپیس و سایر تگ‌ها/ستاره‌ها اینجا به‌صورت متن خام نمایش داده می‌شوند).
+            logger.exception("خطا در ارسال پیام منو با parse_mode='%s'، دوباره بدون فرمت ارسال می‌شود", parse_mode)
+            menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=None)
     _last_sticker_menu[chat_id] = {"sticker_msg_id": new_sticker_msg_id, "menu_msg_id": menu_msg.message_id}
     return menu_msg
 
