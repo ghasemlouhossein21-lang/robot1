@@ -23,19 +23,47 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TEXT_LIMIT = 4096
 
 
+def _telegram_text_units(text: str) -> int:
+    """تعداد واحدهای UTF-16 متن را حساب می‌کند.
+
+    محدودیت طول پیام تلگرام برای متن Unicode عملاً بر مبنای UTF-16 است؛ بنابراین
+    len(text) برای ایموجی‌ها ممکن است کمتر از طولی باشد که تلگرام محاسبه می‌کند.
+    """
+    return len(text.encode("utf-16-le")) // 2
+
+
 def truncate_for_telegram(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
-    """اگر متن از سقف مجاز طول پیام تلگرام بیشتر باشد، آن را کوتاه می‌کند و یک یادداشت کوتاه به انتهایش اضافه می‌کند؛ در غیر این‌صورت متن بدون تغییر برمی‌گردد. هر جایی که احتمال ارسال یک متن طولانی/قابل‌ویرایش (مثلاً پیام خوش‌آمدگویی یا هر متن دیگری که ادمین از پنل ویرایش کرده) وجود دارد، باید قبل از ارسال از این تابع استفاده کند (نه فقط در show_menu_with_sticker)."""
+    """متن را با درنظرگرفتن محدودیت واقعی Telegram کوتاه می‌کند."""
     if text is None:
         return text
-    if len(text) <= limit:
+
+    if _telegram_text_units(text) <= limit:
         return text
+
     suffix = "\n\n… (متن به‌دلیل محدودیت طول پیام تلگرام کوتاه شد)"
-    return text[: limit - len(suffix)] + suffix
+    suffix_units = _telegram_text_units(suffix)
+    budget = max(0, limit - suffix_units)
+
+    # بیشترین تعداد code point که در بودجه‌ی UTF-16 جا می‌شود.
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _telegram_text_units(text[:mid]) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+
+    return text[:lo] + suffix
 
 
 def is_message_too_long_error(exc: Exception) -> bool:
-    """تشخیص می‌دهد که آیا یک TelegramBadRequest دقیقاً از نوع «MESSAGE_TOO_LONG» است (و مثلاً یک خطای مربوط به parse mode نیست)؛ تا همه‌جا یکسان تشخیص داده شود."""
-    return "message is too long" in str(exc).lower()
+    """خطاهای مربوط به عبور متن از سقف طول Telegram را تشخیص می‌دهد."""
+    msg = str(exc).lower()
+    return (
+        "message is too long" in msg
+        or "message_too_long" in msg
+        or "text is too long" in msg
+    )
 
 
 def get_main_keyboard(user_id):
@@ -49,6 +77,7 @@ def get_main_keyboard(user_id):
     except Exception:
         logger.exception("خطا در بررسی وضعیت مخفی‌بودن منوی پایین صفحه")
     return main_reply_keyboard()
+
 
 # سرور ربات (Render) با ساعت UTC کار می‌کند و همه‌ی رشده‌های زمانی ذخیره‌شده در
 # دیتابیس (created_at/expires_at و ...) بر همین اساس هستند؛ برای اینکه چیزی که
@@ -221,7 +250,8 @@ def invalidate_section_sticker_cache(section_key: str) -> None:
 
 # نگاشت یک کلید کوتاه و معنادار (که در کد handlerها استفاده می‌شود) به نام
 # فایل واقعی استیکر روی دیسک (پوشه‌ی stickers/ کنار همین پروژه).
-STICKERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stickers")
+STICKERS_DIR = os.path.join(os.path.dirname(
+    os.path.abspath(__file__)), "stickers")
 STICKER_FILES = {
     "free_test": "test.webm",       # دکمه‌ی «🎁 تست رایگان»
     "buy_plans": "service.webm",    # دکمه‌ی «🛒 خرید اشتراک»
@@ -301,7 +331,8 @@ def _get_section_sticker_override(sticker_key: str) -> dict | None:
         import database as db  # lazy import: از وابستگی حلقوی بین ماژول‌ها جلوگیری می‌شود
         override = db.get_section_sticker(sticker_key)
     except Exception:
-        logger.exception("خطا در خواندن تنظیمات استیکر بخش '%s' از دیتابیس", sticker_key)
+        logger.exception(
+            "خطا در خواندن تنظیمات استیکر بخش '%s' از دیتابیس", sticker_key)
     _section_sticker_override_cache[sticker_key] = override
     _section_sticker_override_cache_loaded.add(sticker_key)
     return override
@@ -369,7 +400,8 @@ async def show_menu_with_sticker(
                         sticker_source = ("path", candidate_path)
 
         if sticker_source:
-            sticker_reply_markup = get_main_keyboard(chat_id) if show_main_keyboard else None
+            sticker_reply_markup = get_main_keyboard(
+                chat_id) if show_main_keyboard else None
             try:
                 if sticker_source[0] == "file_id":
                     sticker_msg = await bot.send_sticker(
@@ -407,7 +439,8 @@ async def show_menu_with_sticker(
             invisible_msg = await bot.send_message(chat_id, "ㅤ", reply_markup=get_main_keyboard(chat_id))
             new_sticker_msg_id = invisible_msg.message_id
         except Exception:
-            logger.exception("خطا در ارسال پیام نامرئی تازه‌سازی منوی پایین صفحه")
+            logger.exception(
+                "خطا در ارسال پیام نامرئی تازه‌سازی منوی پایین صفحه")
 
     try:
         menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
@@ -415,7 +448,8 @@ async def show_menu_with_sticker(
         # 🆕 فیکس: اگر متنی که ادمین از پنل ویرایش کرده (مثلاً پیام خوش‌آمدگویی /start یا هر متن قابل‌ویرایش دیگری) از سقف مجاز تلگرام برای متن پیام (۴۰۹۶ کاراکتر) بلندتر باشد، تلگرام خطای «Bad Request: MESSAGE_TOO_LONG» برمی‌گرداند و قبلاً هیچ‌وقت دوباره تلاشی نمی‌شد (چون فقط حالت parse_mode دست‌کاری می‌شد)؛ برای کاربرانی که تازه روی /start می‌زدند (بیشتر از همه کاربران جدید) کل منوی /start با ارور مواجه می‌شد. حالا اگر خطا دقیقاً همین باشد، متن کوتاه شده دوباره فرستاده می‌شود تا کاربر هیچ‌وقت با خطا مواجه نشود.
         if is_message_too_long_error(e):
             logger.error(
-                "متن منو (پیش‌نمایش %d کاراکتر) از سقف تلگرام (۴۰۹۶) بیشتر بود؛ کوتاه شد و دوباره فرستاده شد.", len(text),
+                "متن منو (پیش‌نمایش %d کاراکتر) از سقف تلگرام (۴۰۹۶) بیشتر بود؛ کوتاه شد و دوباره فرستاده شد.", len(
+                    text),
             )
             safe_text = truncate_for_telegram(text)
             try:
@@ -424,9 +458,11 @@ async def show_menu_with_sticker(
                 menu_msg = await bot.send_message(chat_id=chat_id, text=safe_text, reply_markup=reply_markup, parse_mode=None)
         else:
             # 🆕 فیکس: اگر متن (مثلاً متن سفارشی ویرایش کارت که ادمین از پنل ویرایش کرده) شامل کاراکترهای خاص HTML/Markdown نامعتبر (مثلاً < یا > تکی بدون بسته شدن) باشد و تلگرام نتواند پارسش کند، تلاش برای ارسال مجدد نمی‌شود و کاربر اصلاً منوی را دریافت نمی‌کرد، پس به‌جای شکست کامل، همان متن بدون هیچ قالب‌بندی (parse_mode=None) دوباره فرستاده می‌شود (مونواسپیس و سایر تگ‌ها/ستاره‌ها اینجا به‌صورت متن خام نمایش داده می‌شوند).
-            logger.exception("خطا در ارسال پیام منو با parse_mode='%s'، دوباره بدون فرمت ارسال می‌شود", parse_mode)
+            logger.exception(
+                "خطا در ارسال پیام منو با parse_mode='%s'، دوباره بدون فرمت ارسال می‌شود", parse_mode)
             menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=None)
-    _last_sticker_menu[chat_id] = {"sticker_msg_id": new_sticker_msg_id, "menu_msg_id": menu_msg.message_id}
+    _last_sticker_menu[chat_id] = {
+        "sticker_msg_id": new_sticker_msg_id, "menu_msg_id": menu_msg.message_id}
     return menu_msg
 
 
@@ -474,6 +510,7 @@ async def send_admin_task_message(bot, main_admin_id: int, permission: str, text
         except Exception:
             pass
     return sent
+
 
 async def forward_admin_task_message(bot, main_admin_id: int, permission: str, from_chat_id: int, message_id: int):
     try:
