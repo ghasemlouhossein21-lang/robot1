@@ -25,7 +25,7 @@ import database as db
 import crypto
 import alerts
 from subscription import extract_meta, days_remaining, format_bytes, usage_bar, fetch_subscription_info, format_expire
-from utils import parse_int_in_range, is_duplicate_action, now_tehran_naive, STICKER_SECTION_LABELS, STICKER_FILES, STICKERS_DIR, invalidate_section_sticker_cache, send_notification_sticker, clean_numeric_id, TELEGRAM_TEXT_LIMIT, truncate_for_telegram, is_message_too_long_error
+from utils import parse_int_in_range, is_duplicate_action, now_tehran_naive, STICKER_SECTION_LABELS, STICKER_FILES, STICKERS_DIR, invalidate_section_sticker_cache, send_notification_sticker, clean_numeric_id, TELEGRAM_TEXT_LIMIT, truncate_for_telegram, is_message_too_long_error, serialize_message_entities
 from states import AdminStates, UserStates
 import bot_info
 import payments
@@ -36,7 +36,6 @@ from config import (
     ADMIN_ID,
     DATABASE_PATH,
     AGENCY_VIP_DISCOUNT_PERCENT,
-    REFERRAL_MIN_VOLUME_GB,
     FREE_TEST_PLAN_KEY,
     MARZBAN_ENABLED,
     PASARGAD_ENABLED,
@@ -50,6 +49,7 @@ from keyboards import (
     admin_purchase_notify_keyboard,
     admin_userlist_menu,
     config_delivery_keyboard,
+    main_reply_keyboard,
     admin_services_list_keyboard,
     admin_service_detail_keyboard,
     admin_order_queue_keyboard,
@@ -292,7 +292,25 @@ def _format_volume_gb_label(volume_gb) -> str:
     if v < 1:
         mb = round(v * 1024)
         return f"{mb} مگابایت"
-    return f"{int(v) if v.is_integer() else v:g} گیگابایت"
+    return f"{int(v) if v.is_integer() else v:g} گیگ"
+
+
+
+def _english_digits(value) -> str:
+    text = str(value if value is not None else "")
+    return text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+
+
+def _delivery_service_label(plan_name, volume_gb, days, user_limit, plan_key=None) -> str:
+    """نام نمایشی تحویل سرویس بر اساس اطلاعات واقعی پلن خریداری‌شده."""
+    if plan_key == FREE_TEST_PLAN_KEY:
+        return "تست رایگان"
+
+    volume_text = _format_volume_gb_label(volume_gb) if volume_gb is not None else "نامشخص"
+    days_text = f"زمان {days} روزه" if days else "زمان نامحدود"
+    user_limit_text = "نامحدود کاربر" if not user_limit else f"{user_limit} کاربر"
+
+    return _english_digits(f"{volume_text} | {days_text} | {user_limit_text}")
 
 def _gb_from_bytes(num_bytes) -> float | None:
     if not num_bytes:
@@ -985,13 +1003,15 @@ async def approve_purchase(callback: types.CallbackQuery):
         except Exception:
             logging.getLogger(__name__).exception("خطا در مصرف کد تخفیف کارت‌به‌کارت")
 
-    if plan.get("volume_gb", 0) >= REFERRAL_MIN_VOLUME_GB:
+    order_id = db.create_order(user["id"], plan_key, plan["name"], plan_type(plan_key), price)
+
+    # تأیید کارت‌به‌کارت = پرداخت واقعی و موفق؛ بنابراین فقط بعد از ساخت
+    # سفارشِ همین خرید، پاداش دعوت را آزاد می‌کنیم.
+    if price > 0 and plan_key != FREE_TEST_PLAN_KEY:
         try:
-            db.complete_referral(user["id"])
+            db.complete_referral(user["id"], qualifying_order_id=order_id)
         except ValueError:
             pass
-
-    order_id = db.create_order(user["id"], plan_key, plan["name"], plan_type(plan_key), price)
     try:
         db.resolve_pending_receipt_by_id(receipt_id)
     except Exception:
@@ -1247,19 +1267,27 @@ async def _finalize_send(message: types.Message, state: FSMContext):
 
     volume_text = _format_volume_gb_label(volume_gb)
     days_text = f"{days} روز" if days is not None else "نامحدود"
-    user_limit_text = str(user_limit) if user_limit else "نامحدود"
-
-    caption = (
-        "✅ سرویس با موفقیت ایجاد شد\n\n"
-        f"👤 نام کاربری سرویس : {name}\n"
-        "🇺🇳 لوکیشن: مولتی لوکیشن+تانل\n"
-        f"⏳ مدت زمان: {days_text}\n"
-        f"🗜 حجم سرویس: {volume_text}\n"
-        f"👤 تعداد کاربر:{user_limit_text}\n\n"
-        "لینک اتصال:\n"
-        f"{sub_link}\n\n"
-        "🧑‍💻 شما میتوانید شیوه اتصال را با فشردن دکمه زیر دریافت کنید."
+    plan_name_for_delivery = None
+    if plan_order_id:
+        plan_order = db.get_order(plan_order_id)
+        if plan_order and plan_order.get("plan_key"):
+            plan_obj = db.get_effective_plan(plan_order["plan_key"])
+            if plan_obj:
+                plan_name_for_delivery = plan_obj.get("name")
+    delivery_label = (
+        _delivery_service_label(
+            plan_name_for_delivery,
+            volume_gb,
+            days,
+            user_limit,
+            plan_order.get("plan_key") if plan_order_id and plan_order else None,
+        )
+        if plan_name_for_delivery or plan_order_id
+        else _delivery_service_label(name, volume_gb, days, None)
     )
+    is_test_delivery = bool(plan_order_id and plan_order and plan_order.get("plan_key") == FREE_TEST_PLAN_KEY)
+    delivery_text_key = "service_delivery_test_text" if is_test_delivery else "service_delivery_text"
+    caption = t(delivery_text_key, service_label=_english_digits(delivery_label), link=sub_link)
 
     expiry_date = None
     if days is not None:
@@ -1280,17 +1308,15 @@ async def _finalize_send(message: types.Message, state: FSMContext):
 
     try:
         await send_notification_sticker(message.bot, int(uid), "notif_service_delivery")
-        try:
-            await message.bot.send_message(int(uid), db.get_text_override("notif_service_delivery", "📦 سرویس شما آماده شد ⬇️"), reply_markup=types.ReplyKeyboardRemove())
-            db.set_keyboard_hidden(int(uid), True)
-        except Exception:
-            pass
         await message.bot.send_photo(
             int(uid),
             qr_file_id,
             caption=caption,
-            reply_markup=config_delivery_keyboard(bot_info.get('connection_guide_url')),
+            reply_markup=config_delivery_keyboard(is_test=is_test_delivery),
         )
+        # منوی پایینی دائمی کاربر نباید بعد از تحویل سرویس مخفی شود.
+        db.set_keyboard_hidden(int(uid), False)
+        await message.bot.send_message(int(uid), "⬇️ منوی اصلی شما همچنان در دسترس است.", reply_markup=main_reply_keyboard())
         await message.answer("✅ کانفیگ برای کاربر ارسال شد.")
         await _notify_main_admin_action(message.bot, message.from_user, "ارسال کانفیگ", uid, plan_name)
     except Exception as e:
@@ -1357,12 +1383,23 @@ def _text_manager_keyboard(category: str | None = None):
         return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
     items = TEXT_CATEGORIES.get(category, [])
+    delivery_labels = {
+        "service_delivery_text": "✏️ تغییر متن تحویل سرویس (بسته‌ها)",
+        "service_delivery_apps_button": "📱 دکمه لینک برنامه‌ها (بسته‌ها)",
+        "service_delivery_connection_button": "🔧 دکمه اتصال کانفینگ (بسته‌ها)",
+        "service_delivery_test_text": "✏️ تغییر متن تحویل سرویس (تست)",
+        "service_delivery_test_apps_button": "📱 دکمه لینک برنامه‌ها (تست)",
+        "service_delivery_test_connection_button": "🔧 دکمه اتصال کانفینگ (تست)",
+    }
     for i in range(0, len(items), 2):
         row = []
         for key, default in items[i:i + 2]:
             value = user_text(key, default).replace("\n", " ")[:22]
+            label = delivery_labels.get(key, f"✏️ {key[:14]} | {value}")
+            if key in delivery_labels:
+                label = f"✏️ {label}"
             row.append(types.InlineKeyboardButton(
-                text=f"✏️ {key[:14]} | {value}",
+                text=label,
                 callback_data=f"textedit_{key}",
                 style="primary",
             ))
@@ -3790,13 +3827,20 @@ async def admin_botinfo_edit_save(message: types.Message, state: FSMContext):
             )
             return
         value = cleaned
-    # 🆕 فیکس: اگر این مقدار (مثلاً پیام خوش‌آمدگویی /start) از سقف مجاز تلگرام برای متن پیام (۴۰۹۶ کاراکتر) بلندتر ذخیره شود، بعداً هر بار که این متن (به‌همراه متن ثابت دیگری که دورش چسبیده می‌شود) فرستاده شود، تلگرام خطای «Bad Request: MESSAGE_TOO_LONG» برمی‌گرداند و منوی مربوطه (مثلاً /start برای هر کاربر) با ارور مواجه می‌شد. اینجا قبل از ذخیره‌شدن جلوی این حالت گرفته می‌شود (علاوه بر محافظتی که در show_menu_with_sticker اضافه شد).
-    if len(value) > 3800:
+    # متن را تا سقف واقعی Telegram Bot API می‌پذیریم. مسیر /start هنگام ارسال
+    # متن ثابت پایین را هم حساب می‌کند و اگر مجموع از سقف عبور کند، امن کوتاه می‌شود.
+    from utils import telegram_utf16_length
+    if telegram_utf16_length(value) > TELEGRAM_TEXT_LIMIT:
         await message.answer(
-            f"❌ این متن خیلی طولانی است ({len(value)} کاراکتر) و ممکن است تلگرام آن را رد کند (سقف تلگرام: ۴۰۹۶ کاراکتر). لطفاً متن کوتاه‌تری بفرست:"
+            f"❌ متن از سقف تلگرام بیشتر است. سقف واقعی: {TELEGRAM_TEXT_LIMIT} واحد UTF-16. لطفاً متن کوتاه‌تری بفرست:"
         )
         return
-    bot_info.set(key, value)
+    if key == "welcome_text":
+        # Custom/Premium Emoji به‌صورت MessageEntity می‌آید؛ ذخیره‌ی صرفِ message.text
+        # شناسه‌ی emoji را از بین می‌برد.
+        bot_info.set_welcome_text_with_entities(value, serialize_message_entities(message.entities))
+    else:
+        bot_info.set(key, value)
     await state.clear()
     await message.answer(f"✅ «{labels[key]}» به‌روز شد.", reply_markup=admin_botinfo_menu())
 
