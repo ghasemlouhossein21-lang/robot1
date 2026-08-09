@@ -12,6 +12,7 @@ from aiogram.types import (
 )
 
 import database as db
+from text_catalog import text as t
 import bot_info
 import vpn_panel
 from config import UNIQUEPAY_ENABLED, MARZBAN_ENABLED, PASARGAD_ENABLED, ONLINE_PAYMENT_MIN_AMOUNT
@@ -41,31 +42,11 @@ def InlineKeyboardButton(*args, **kwargs):
 # عضویت اجباری
 # ---------------------------------------------------------------------------
 def join_channels_keyboard(channels):
-    """کیبورد عضویت اجباری در کانال‌ها.
-
-    هر عضوِ inline_keyboard باید یک InlineKeyboardButton باشد، نه یک لیستِ
-    تو در تو. قبلاً buttons خودش شامل «ردیف‌ها» بود و سپس با buttons[i:i+2]
-    دوباره داخل ردیف قرار می‌گرفت؛ در aiogram 3 این ساختار باعث ValidationError
-    می‌شد و مسیر /start را می‌شکست.
-    """
-    buttons = [
-        InlineKeyboardButton(
-            text=f"📢 {ch['name']}",
-            url=ch["url"],
-            style="primary",
-        )
+    rows = [
+        [InlineKeyboardButton(text=f"📢 {ch['name']}", url=ch["url"], style="primary")]
         for ch in channels
     ]
-    buttons.append(
-        InlineKeyboardButton(
-            text="✅ عضو شدم",
-            callback_data="check_join",
-            style="success",
-        )
-    )
-
-    # دو دکمه در هر ردیف؛ خروجی دقیقاً list[list[InlineKeyboardButton]] است.
-    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton(text=t("join_confirm"), callback_data="check_join", style="success")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -75,17 +56,18 @@ def join_channels_keyboard(channels):
 def main_reply_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🛒 خرید اشتراک", style="success"), KeyboardButton(text="🎁 تست رایگان", style="success")],
-            [KeyboardButton(text="📱 سرویس‌های من", style="primary"), KeyboardButton(text="💰 کیف پول", style="primary")],
-            [KeyboardButton(text="👥 دعوت دوستان", style="primary"), KeyboardButton(text="👤 پروفایل من", style="primary")],
-            [KeyboardButton(text="👨‍💻 پشتیبانی", style="primary"), KeyboardButton(text="📚 راهنما", style="primary")],
-            [KeyboardButton(text="🤝 درخواست نمایندگی", style="danger")],
+            [KeyboardButton(text=db.get_text_override("main_buy", "🛒 خرید اشتراک"), style="success"), KeyboardButton(text=db.get_text_override("main_free_test", "🎁 تست رایگان"), style="success")],
+            [KeyboardButton(text=db.get_text_override("main_configs", "📱 سرویس‌های من"), style="primary"), KeyboardButton(text=db.get_text_override("main_wallet", "💰 کیف پول"), style="primary")],
+            [KeyboardButton(text=db.get_text_override("main_referral", "👥 دعوت دوستان"), style="primary"), KeyboardButton(text=db.get_text_override("main_profile", "👤 پروفایل من"), style="primary")],
+            [KeyboardButton(text=db.get_text_override("main_support", "👨‍💻 پشتیبانی"), style="primary"), KeyboardButton(text=db.get_text_override("main_guides", "📚 راهنما"), style="primary")],
+            [KeyboardButton(text=t("main_agency"), style="danger")],
         ],
         resize_keyboard=True,
-        # 🆕 فیکس نهایی: is_persistent=True برگردانده شد تا دکمه‌ی چهارخونه‌ی پنهان/نمایان
-        # کردن منو همیشه در کنار صفحه باقی بماند (حتی وقتی که کیبورد تایپ بسته است)،
-        # نه فقط وقتی کیبورد تایپ باز باشد.
-        is_persistent=True,
+        # منوی ربات توسط کلاینت تلگرام قابل باز/بسته شدن باشد.
+        # وقتی is_persistent=False باشد، تلگرام آیکون چهارخونه/کیبورد
+        # را برای باز و بسته کردن Reply Keyboard در اختیار کاربر می‌گذارد.
+        is_persistent=False,
+        one_time_keyboard=False,
     )
 
 
@@ -110,12 +92,12 @@ def admin_reply_keyboard(orders_enabled: bool | None = None, permissions: set[st
     add_pair("users", KeyboardButton(text="👥 لیست کاربران", style="primary"), "users", KeyboardButton(text="🔍 جستجوی کاربر", style="primary"))
     add_pair("broadcast", KeyboardButton(text="📢 پیام همگانی", style="primary"), "discounts", KeyboardButton(text="🎟 مدیریت تخفیف", style="primary"))
     add_pair("agency", KeyboardButton(text="🤝 نمایندگی (تخفیف VIP)", style="primary"), "plans", KeyboardButton(text="🗂 دسته‌بندی‌های VIP", style="primary"))
-    add_pair("plans", KeyboardButton(text="🎮 دسته‌بندی‌های Gaming", style="primary"), "vpn_panel", KeyboardButton(text="📦 نگاشت پلن‌ها به پنل فعال", style="primary"))
+    add_pair("plans", KeyboardButton(text="📦 نگاشت پلن‌ها به پنل فعال", style="primary"))
     add_pair("vpn_panel", KeyboardButton(text="🛡️ اتصال پنل پاسارگارد", style="primary"), "vpn_panel", KeyboardButton(text="🔀 انتخاب پنل VPN فعال", style="primary"))
     add_pair("referrals", KeyboardButton(text="🤝 مدیریت دعوت‌ها", style="primary"), "guides", KeyboardButton(text="📚 مدیریت راهنما", style="primary"))
     add_pair("logs", KeyboardButton(text="🦖 لاگ خطاها", style="primary"), "botinfo", KeyboardButton(text="ℹ️ اطلاعات ربات", style="primary"))
     add_pair("stickers", KeyboardButton(text="🎬 استیکرهای منو", style="primary"), "backup", KeyboardButton(text="💾 بکاپ", style="primary"))
-    add_pair("settings", KeyboardButton(text="🎁 تنظیم تست رایگان", style="primary"), "settings", KeyboardButton(text="🧩 تنظیم بساز سرویس خودت", style="primary"))
+    add_pair("texts", KeyboardButton(text="📝 مدیریت متن‌های کاربر", style="primary"), "settings", KeyboardButton(text="🎁 تنظیم تست رایگان", style="primary"))
     if allowed("orders_toggle"):
         toggle_btn = (KeyboardButton(text="🔴 خاموش کردن سفارشات", style="danger") if orders_enabled else KeyboardButton(text="🟢 روشن کردن سفارشات", style="success"))
         rows.append([toggle_btn])
@@ -125,7 +107,12 @@ def admin_reply_keyboard(orders_enabled: bool | None = None, permissions: set[st
         rows = [[KeyboardButton(text="⛔ بدون دسترسی", style="danger")]]
     # 🆕 فیکس نهایی: همان دلیل بالا در main_reply_keyboard — is_persistent=True برگردانده شد
     # تا دکمه‌ی چهارخونه همیشه (حتی بدون بازبودن کیبورد تایپ) در دسترس باشد.
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        is_persistent=False,
+        one_time_keyboard=False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -158,49 +145,51 @@ def all_reply_menu_texts() -> set[str]:
 # ---------------------------------------------------------------------------
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛒 خرید اشتراک", callback_data="plans", style="success")],
-        [InlineKeyboardButton(text="🎁 تست رایگان", callback_data="buy_plan_test", style="success")],
-        [InlineKeyboardButton(text="📱 سرویس‌های من", callback_data="my_configs", style="primary")],
-        [InlineKeyboardButton(text="💰 کیف پول", callback_data="wallet", style="primary")],
-        [InlineKeyboardButton(text="👥 دعوت دوستان و کسب درآمد", callback_data="referral", style="primary")],
-        [InlineKeyboardButton(text="👤 پروفایل من", callback_data="profile", style="primary")],
-        [InlineKeyboardButton(text="👨‍💻 پشتیبانی", callback_data="support", style="primary")],
-        [InlineKeyboardButton(text="📚 راهنما", callback_data="user_guides", style="primary")],
+        [InlineKeyboardButton(text=t("main_buy"), callback_data="plans", style="success")],
+        [InlineKeyboardButton(text=t("main_free_test"), callback_data="buy_plan_test", style="success")],
+        [InlineKeyboardButton(text=t("main_configs"), callback_data="my_configs", style="primary")],
+        [InlineKeyboardButton(text=t("main_wallet"), callback_data="wallet", style="primary")],
+        [InlineKeyboardButton(text=t("main_referral"), callback_data="referral", style="primary")],
+        [InlineKeyboardButton(text=t("main_profile"), callback_data="profile", style="primary")],
+        [InlineKeyboardButton(text=t("main_support"), callback_data="support", style="primary")],
+        [InlineKeyboardButton(text=t("main_guides"), callback_data="user_guides", style="primary")],
        
     ])
 
 
-def back_button(callback_data: str = "back", text: str = "🏠 بازگشت به منوی اصلی"):
+def back_button(callback_data: str = "back", text: str | None = None):
+    if text is None:
+        text = t("main_back")
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=callback_data, style="danger")]])
 
 
 def profile_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 کیف پول آزاد", callback_data="wallet_free", style="primary")],
-        [InlineKeyboardButton(text="🔒 کیف پول مسدود", callback_data="wallet_locked", style="danger")],
-        [InlineKeyboardButton(text="🛒 تاریخچه خرید", callback_data="purchase_history", style="primary")],
-        [InlineKeyboardButton(text="📋 تاریخچه تراکنش", callback_data="transactions", style="primary")],
-        [InlineKeyboardButton(text="🔗 لینک دعوت اختصاصی", callback_data="referral", style="success")],
-        [InlineKeyboardButton(text="🏠 بازگشت به منوی اصلی", callback_data="back", style="danger")],
+        [InlineKeyboardButton(text=t("profile_free_wallet"), callback_data="wallet_free", style="primary")],
+        [InlineKeyboardButton(text=t("profile_locked_wallet"), callback_data="wallet_locked", style="danger")],
+        [InlineKeyboardButton(text=t("profile_history"), callback_data="purchase_history", style="primary")],
+        [InlineKeyboardButton(text=t("profile_transactions"), callback_data="transactions", style="primary")],
+        [InlineKeyboardButton(text=t("profile_referral"), callback_data="referral", style="success")],
+        [InlineKeyboardButton(text=t("profile_back"), callback_data="back", style="danger")],
     ])
 
 
 def wallet_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 شارژ کیف پول", callback_data="charge", style="success")],
-        [InlineKeyboardButton(text="🎟 ثبت کد تخفیف", callback_data="use_discount", style="success")],
-        [InlineKeyboardButton(text="📋 تراکنش‌های من", callback_data="transactions", style="primary")],
-        [InlineKeyboardButton(text="🏠 بازگشت به منوی اصلی", callback_data="back", style="danger")],
+        [InlineKeyboardButton(text=t("wallet_charge"), callback_data="charge", style="success")],
+        [InlineKeyboardButton(text=t("wallet_discount"), callback_data="use_discount", style="success")],
+        [InlineKeyboardButton(text=t("wallet_transactions"), callback_data="transactions", style="primary")],
+        [InlineKeyboardButton(text=t("wallet_back"), callback_data="back", style="danger")],
     ])
 
 
 def charge_amount_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 ۵۰,۰۰۰ تومان", callback_data="charge_50000", style="primary")],
-        [InlineKeyboardButton(text="💰 ۱۰۰,۰۰۰ تومان", callback_data="charge_100000", style="primary")],
-        [InlineKeyboardButton(text="💰 ۲۰۰,۰۰۰ تومان", callback_data="charge_200000", style="primary")],
-        [InlineKeyboardButton(text="💵 مبلغ دلخواه", callback_data="charge_custom", style="primary")],
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="wallet", style="danger")],
+        [InlineKeyboardButton(text=t("charge_50000"), callback_data="charge_50000", style="primary")],
+        [InlineKeyboardButton(text=t("charge_100000"), callback_data="charge_100000", style="primary")],
+        [InlineKeyboardButton(text=t("charge_200000"), callback_data="charge_200000", style="primary")],
+        [InlineKeyboardButton(text=t("charge_custom"), callback_data="charge_custom", style="primary")],
+        [InlineKeyboardButton(text=t("back"), callback_data="wallet", style="danger")],
     ])
 
 
@@ -212,32 +201,32 @@ def charge_payment_method_keyboard(amount: int):
     buttons = []
     if UNIQUEPAY_ENABLED and amount > ONLINE_PAYMENT_MIN_AMOUNT:
         buttons.append(
-            [InlineKeyboardButton(text="🌐 پرداخت آنلاین (تایید خودکار)", callback_data=f"chargepay_online_{amount}", style="success")]
+            [InlineKeyboardButton(text=t("wallet_pay_online"), callback_data=f"chargepay_online_{amount}", style="success")]
         )
-    buttons.append([InlineKeyboardButton(text="💳 پرداخت کارت به کارت", callback_data=f"chargepay_card_{amount}", style="success")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="charge", style="danger")])
+    buttons.append([InlineKeyboardButton(text=t("wallet_pay_card"), callback_data=f"chargepay_card_{amount}", style="success")])
+    buttons.append([InlineKeyboardButton(text=t("back"), callback_data="charge", style="danger")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def online_payment_wallet_keyboard(payment_link: str, online_payment_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 پرداخت (کارت به کارت خودکار)", url=payment_link, style="success")],
-        [InlineKeyboardButton(text="✅ پرداخت را انجام دادم / بررسی کن", callback_data=f"checkpay_{online_payment_id}", style="success")],
-        [InlineKeyboardButton(text="🔙 انصراف", callback_data="wallet", style="danger")],
+        [InlineKeyboardButton(text=t("wallet_online_pay"), url=payment_link, style="success")],
+        [InlineKeyboardButton(text=t("wallet_check_pay"), callback_data=f"checkpay_{online_payment_id}", style="success")],
+        [InlineKeyboardButton(text=t("wallet_cancel"), callback_data="wallet", style="danger")],
     ])
 
 
 def referral_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏠 بازگشت به منوی اصلی", callback_data="back", style="danger")],
+        [InlineKeyboardButton(text=t("referral_back"), callback_data="back", style="danger")],
     ])
 
 
 def support_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎫 ارسال تیکت", callback_data="ticket", style="primary")],
-        [InlineKeyboardButton(text="📢 کانال اصلی و پشتیبان", url=bot_info.get_support_url(), style="primary")],
-        [InlineKeyboardButton(text="🏠 بازگشت به منوی اصلی", callback_data="back", style="danger")],
+        [InlineKeyboardButton(text=t("support_ticket"), callback_data="ticket", style="primary")],
+        [InlineKeyboardButton(text=t("support_channels"), url=bot_info.get_support_url(), style="primary")],
+        [InlineKeyboardButton(text=t("support_back"), callback_data="back", style="danger")],
     ])
 
 
@@ -245,33 +234,12 @@ def support_menu():
 # سرویس‌ها / خرید اشتراک
 # ---------------------------------------------------------------------------
 def plans_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 سرور VIP (V2Ray)", callback_data="plans_vip", style="success")],
-        [InlineKeyboardButton(text="🌐 سرور Gaming (WireGuard)", callback_data="plans_gaming", style="success")],
-        [InlineKeyboardButton(text="✨〰️〰️〰️〰️〰️✨", callback_data="noop")],
-        [InlineKeyboardButton(text="🚀 کانفیگ خودتو بساز (ویژه VIP) 🛠", callback_data="cbuild_start", style="primary")],
-        [InlineKeyboardButton(text="✨〰️〰️〰️〰️〰️✨", callback_data="noop")],
-        [InlineKeyboardButton(text="🏠 بازگشت به منوی اصلی", callback_data="back", style="danger")],
-    ])
+    """🧹 دیگر مستقیماً استفاده نمی‌شود: دکمهٔ «🛒 خرید اشتراک» مستقیماً دسته‌بندی‌های VIP را باز می‌کند (vip_categories_keyboard)."""
+    return vip_categories_keyboard()
 
 
-def custom_build_payment_keyboard():
-    buttons = [
-        [InlineKeyboardButton(text="👛 پرداخت از کیف پول", callback_data="cbuild_pay_wallet", style="success")],
-    ]
-    if UNIQUEPAY_ENABLED:
-        buttons.append(
-            [InlineKeyboardButton(text="🌐 پرداخت آنلاین (تایید خودکار)", callback_data="cbuild_pay_online", style="success")]
-        )
-    buttons.append([InlineKeyboardButton(text="💳 پرداخت کارت به کارت", callback_data="cbuild_pay_card", style="success")])
-    buttons.append([InlineKeyboardButton(text="🔙 انصراف", callback_data="plans", style="danger")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def custom_build_cancel_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 انصراف", callback_data="plans", style="danger")],
-    ])
 
 
 def _plans_keyboard(plans_dict: dict, icon: str, discount_percent: int = 0):
@@ -284,7 +252,7 @@ def _plans_keyboard(plans_dict: dict, icon: str, discount_percent: int = 0):
             text=f"{icon} {plan['name']} — {price:,} تومان",
             callback_data=f"buy_{key}"
         , style="success")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="plans", style="danger")])
+    buttons.append([InlineKeyboardButton(text=t("plans_back"), callback_data="plans", style="danger")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -295,8 +263,8 @@ def vip_categories_keyboard():
     for cat in db.get_vip_categories():
         buttons.append([InlineKeyboardButton(text=f"🚀 {cat['name']}", callback_data=f"vipcat_{cat['key']}", style="primary")])
     if not buttons:
-        buttons.append([InlineKeyboardButton(text="😔 فعلاً هیچ دسته‌ای موجود نیست", callback_data="noop", style="primary")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="plans", style="danger")])
+        buttons.append([InlineKeyboardButton(text=t("vip_category_empty"), callback_data="noop", style="primary")])
+    buttons.append([InlineKeyboardButton(text=t("plans_back"), callback_data="back", style="danger")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -313,39 +281,13 @@ def vip_category_plans_keyboard(category_key: str, discount_percent: int = 0):
             text=f"🚀 {plan['name']} — {price:,} تومان", callback_data=f"buy_{plan['plan_key']}"
         , style="primary")])
     if not buttons:
-        buttons.append([InlineKeyboardButton(text="😔 فعلاً هیچ پلنی در این دسته نیست", callback_data="noop", style="primary")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت به دسته‌بندی‌ها", callback_data="plans_vip", style="danger")])
+        buttons.append([InlineKeyboardButton(text=t("vip_plans_empty"), callback_data="noop", style="primary")])
+    buttons.append([InlineKeyboardButton(text=t("vip_plans_back"), callback_data="plans_vip", style="danger")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def gaming_categories_keyboard():
-    """مرحله‌ی اول خرید Gaming: لیست دسته‌بندی‌ها (دقیقاً مثل VIP، از پنل ادمین
-    قابل مدیریت است)."""
-    buttons = []
-    for cat in db.get_gaming_categories():
-        buttons.append([InlineKeyboardButton(text=f"🎮 {cat['name']}", callback_data=f"gamingcat_{cat['key']}", style="primary")])
-    if not buttons:
-        buttons.append([InlineKeyboardButton(text="😔 فعلاً هیچ دسته‌ای موجود نیست", callback_data="noop", style="primary")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="plans", style="danger")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def gaming_category_plans_keyboard(category_key: str, discount_percent: int = 0):
-    """مرحله‌ی دوم: پلن‌های داخل یک دسته‌ی Gaming خاص."""
-    cat = db.get_gaming_category(category_key)
-    plans = db.get_gaming_plans(cat["id"]) if cat else []
-    buttons = []
-    for plan in plans:
-        price = plan["price"]
-        if discount_percent:
-            price = int(price * (1 - discount_percent / 100))
-        buttons.append([InlineKeyboardButton(
-            text=f"🌐 {plan['name']} — {price:,} تومان", callback_data=f"buy_{plan['plan_key']}"
-        , style="primary")])
-    if not buttons:
-        buttons.append([InlineKeyboardButton(text="😔 فعلاً هیچ پلنی در این دسته نیست", callback_data="noop", style="primary")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت به دسته‌بندی‌ها", callback_data="plans_gaming", style="danger")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def all_plans_discount_keyboard(discount_percent: int):
@@ -354,31 +296,31 @@ def all_plans_discount_keyboard(discount_percent: int):
 
 def purchase_payment_keyboard(plan_key: str, show_discount: bool = True):
     buttons = [
-        [InlineKeyboardButton(text="👛 پرداخت از کیف پول", callback_data=f"pay_wallet_{plan_key}", style="success")],
+        [InlineKeyboardButton(text=t("pay_wallet"), callback_data=f"pay_wallet_{plan_key}", style="success")],
     ]
     if UNIQUEPAY_ENABLED:
         buttons.append(
-            [InlineKeyboardButton(text="🌐 پرداخت آنلاین (تایید خودکار)", callback_data=f"pay_online_{plan_key}", style="success")]
+            [InlineKeyboardButton(text=t("pay_online"), callback_data=f"pay_online_{plan_key}", style="success")]
         )
-    buttons.append([InlineKeyboardButton(text="💳 پرداخت کارت به کارت", callback_data=f"pay_card_{plan_key}", style="success")])
+    buttons.append([InlineKeyboardButton(text=t("pay_card"), callback_data=f"pay_card_{plan_key}", style="success")])
     if show_discount:
-        buttons.append([InlineKeyboardButton(text="🎟 ثبت کد تخفیف", callback_data=f"discount_plan_{plan_key}", style="primary")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="plans", style="danger")])
+        buttons.append([InlineKeyboardButton(text=t("pay_discount"), callback_data=f"discount_plan_{plan_key}", style="primary")])
+    buttons.append([InlineKeyboardButton(text=t("pay_back"), callback_data="back", style="danger")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def online_payment_keyboard(payment_link: str, online_payment_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 پرداخت (کارت به کارت خودکار)", url=payment_link, style="primary")],
-        [InlineKeyboardButton(text="✅ پرداخت را انجام دادم / بررسی کن", callback_data=f"checkpay_{online_payment_id}", style="success")],
-        [InlineKeyboardButton(text="🔙 انصراف", callback_data="plans", style="danger")],
+        [InlineKeyboardButton(text=t("online_pay"), url=payment_link, style="primary")],
+        [InlineKeyboardButton(text=t("online_check"), callback_data=f"checkpay_{online_payment_id}", style="success")],
+        [InlineKeyboardButton(text=t("online_cancel"), callback_data="plans", style="danger")],
     ])
 
 
 def insufficient_balance_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💵 شارژ کیف پول", callback_data="wallet", style="primary")],
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="plans", style="danger")],
+        [InlineKeyboardButton(text=t("insufficient_charge"), callback_data="wallet", style="primary")],
+        [InlineKeyboardButton(text=t("insufficient_back"), callback_data="plans", style="danger")],
     ])
 
 
@@ -387,9 +329,8 @@ def insufficient_balance_keyboard():
 # ---------------------------------------------------------------------------
 def my_configs_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 سرویس‌های VIP من", callback_data="my_configs_vip", style="primary")],
-        [InlineKeyboardButton(text="🎮 سرویس‌های گیمینگ من", callback_data="my_configs_gaming", style="primary")],
-        [InlineKeyboardButton(text="🏠 بازگشت به منوی اصلی", callback_data="back", style="danger")],
+        [InlineKeyboardButton(text=t("configs_vip"), callback_data="my_configs_vip", style="primary")],
+        [InlineKeyboardButton(text=t("configs_back"), callback_data="back", style="danger")],
     ])
 
 
@@ -398,118 +339,100 @@ def my_configs_list_keyboard(configs, icon: str, back_callback: str):
         [InlineKeyboardButton(text=f"{icon} {cfg['plan']}", callback_data=f"viewconfig_{cfg['id']}", style="primary")]
         for cfg in configs
     ]
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data=back_callback, style="danger")])
+    buttons.append([InlineKeyboardButton(text=t("back"), callback_data=back_callback, style="danger")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def config_detail_keyboard(cfg_id, sub_link_url: str | None = None, has_qr: bool = False, back_callback: str = "my_configs_vip", service_id: str | None = None, disabled: bool = False):
-    """کیبورد جزئیات سرویس VIP: تمدید + کیوآرکد + لینک ساب + حذف سرویس."""
+    """کیبورد جزئیات سرویس VIP: کیوآرکد + لینک ساب + مدیریت سرویس + حذف سرویس."""
     buttons = [
-        [InlineKeyboardButton(text="🔁 تمدید سرویس", callback_data=f"renew_{cfg_id}", style="success")],
     ]
     row = []
     if has_qr:
-        row.append(InlineKeyboardButton(text="🖼 مشاهده کیوآرکد", callback_data=f"viewqr_{cfg_id}", style="primary"))
+        row.append(InlineKeyboardButton(text=t("config_qr"), callback_data=f"viewqr_{cfg_id}", style="primary"))
     if sub_link_url:
-        row.append(InlineKeyboardButton(text="🔗 باز کردن لینک ساب", url=sub_link_url, style="primary"))
+        row.append(InlineKeyboardButton(text=t("config_sub"), url=sub_link_url, style="primary"))
     if row:
         buttons.append(row)
     if sub_link_url:
-        buttons.append([InlineKeyboardButton(text="🔗 دریافت کانفیگ‌های تکی", callback_data=f"mirrorconfigs_{cfg_id}", style="success")])
+        buttons.append([InlineKeyboardButton(text=t("config_mirror"), callback_data=f"mirrorconfigs_{cfg_id}", style="success")])
     if service_id:
         if disabled:
-            buttons.append([InlineKeyboardButton(text="▶️ فعال‌سازی سرویس", callback_data=f"cfgenable_{cfg_id}", style="success")])
+            buttons.append([InlineKeyboardButton(text=t("config_enable"), callback_data=f"cfgenable_{cfg_id}", style="success")])
         else:
-            buttons.append([InlineKeyboardButton(text="⏸ غیرفعال‌سازی سرویس", callback_data=f"cfgdisable_{cfg_id}", style="danger")])
-        buttons.append([InlineKeyboardButton(text="🔄 ساخت لینک ساب جدید", callback_data=f"cfgrevokesub_{cfg_id}", style="danger")])
-    buttons.append([InlineKeyboardButton(text="🗑 حذف سرویس", callback_data=f"delconfig_{cfg_id}", style="danger")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت به سرویس‌های VIP من", callback_data=back_callback, style="danger")])
+            buttons.append([InlineKeyboardButton(text=t("config_disable"), callback_data=f"cfgdisable_{cfg_id}", style="danger")])
+        buttons.append([InlineKeyboardButton(text=t("config_revoke"), callback_data=f"cfgrevokesub_{cfg_id}", style="danger")])
+    buttons.append([InlineKeyboardButton(text=t("config_delete"), callback_data=f"delconfig_{cfg_id}", style="danger")])
+    buttons.append([InlineKeyboardButton(text=t("config_back"), callback_data=back_callback, style="danger")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def gaming_config_detail_keyboard(cfg_id, sub_link_url: str | None = None, back_callback: str = "my_configs_gaming", service_id: str | None = None, disabled: bool = False):
-    """کیبورد جزئیات سرویس گیمینگ: دریافت فایل‌ها + لینک ساب + حذف سرویس."""
-    buttons = [
-        [InlineKeyboardButton(text="📥 دریافت دوباره فایل‌های کانفیگ", callback_data=f"redownload_{cfg_id}", style="success")],
-    ]
-    if sub_link_url:
-        buttons.append([InlineKeyboardButton(text="🔗 باز کردن لینک ساب", url=sub_link_url, style="primary")])
-    if service_id:
-        if disabled:
-            buttons.append([InlineKeyboardButton(text="▶️ فعال‌سازی سرویس", callback_data=f"cfgenable_{cfg_id}", style="success")])
-        else:
-            buttons.append([InlineKeyboardButton(text="⏸ غیرفعال‌سازی سرویس", callback_data=f"cfgdisable_{cfg_id}", style="danger")])
-        buttons.append([InlineKeyboardButton(text="🔄 ساخت لینک ساب جدید", callback_data=f"cfgrevokesub_{cfg_id}", style="danger")])
-    buttons.append([InlineKeyboardButton(text="🗑 حذف سرویس", callback_data=f"delconfig_{cfg_id}", style="danger")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت به سرویس‌های گیمینگ من", callback_data=back_callback, style="danger")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def confirm_delete_config_keyboard(cfg_id):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ بله، حذف کن", callback_data=f"delconfirm_{cfg_id}", style="danger")],
-        [InlineKeyboardButton(text="❌ انصراف", callback_data=f"viewconfig_{cfg_id}", style="danger")],
+        [InlineKeyboardButton(text=t("confirm_delete_yes"), callback_data=f"delconfirm_{cfg_id}", style="danger")],
+        [InlineKeyboardButton(text=t("confirm_delete_no"), callback_data=f"viewconfig_{cfg_id}", style="danger")],
     ])
 
 
 def confirm_disable_service_keyboard(cfg_id):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ بله، غیرفعال کن", callback_data=f"cfgdisabledo_{cfg_id}", style="danger")],
-        [InlineKeyboardButton(text="❌ انصراف", callback_data=f"viewconfig_{cfg_id}", style="danger")],
+        [InlineKeyboardButton(text=t("confirm_disable_yes"), callback_data=f"cfgdisabledo_{cfg_id}", style="danger")],
+        [InlineKeyboardButton(text=t("confirm_disable_no"), callback_data=f"viewconfig_{cfg_id}", style="danger")],
     ])
 
 
 def confirm_revoke_sub_keyboard(cfg_id):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ بله، لینک جدید بساز", callback_data=f"cfgrevokesubdo_{cfg_id}", style="danger")],
-        [InlineKeyboardButton(text="❌ انصراف", callback_data=f"viewconfig_{cfg_id}", style="danger")],
+        [InlineKeyboardButton(text=t("confirm_revoke_yes"), callback_data=f"cfgrevokesubdo_{cfg_id}", style="danger")],
+        [InlineKeyboardButton(text=t("confirm_revoke_no"), callback_data=f"viewconfig_{cfg_id}", style="danger")],
     ])
 
 
-def gaming_ready_keyboard(config_id):
-    """زیر پیام «کانفیگ شما آماده شد» که بلافاصله بعد از تأیید ادمین ارسال می‌شود."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📥 دریافت کانفیگ‌های سرویس", callback_data=f"redownload_{config_id}", style="success")],
-    ])
 
 
 # ---------------------------------------------------------------------------
 # پنل ادمین
 # ---------------------------------------------------------------------------
 def admin_panel_menu(orders_enabled: bool = True, permissions: set[str] | None = None, is_main_admin: bool = True):
-    """Inline admin panel (دکمه‌های شیشه‌ای). برای ادمین فرعی دکمه‌های بدون مجوز اصلاً نمایش داده نمی‌شود."""
+    """Inline admin panel. همان گزینه‌های منوی پایین، با دو دکمه در هر ردیف."""
     def allowed(perm: str) -> bool:
         return is_main_admin or permissions is None or perm in permissions
 
     buttons = []
     def add(text, callback_data, perm, style="primary"):
         if allowed(perm):
-            buttons.append([InlineKeyboardButton(text=text, callback_data=callback_data, style=style)])
+            buttons.append(InlineKeyboardButton(text=text, callback_data=callback_data, style=style))
 
+    # دقیقاً هماهنگ با منوی پایین پنل ادمین
     add("📊 آمار", "admin_stats", "stats")
     add("📥 صف درخواست‌ها", "admin_request_queue", "requests", "success")
     add("👥 لیست کاربران", "admin_userlist", "users")
     add("🔍 جستجوی حرفه‌ای", "admin_search", "users")
+    add("📢 پیام همگانی", "admin_broadcast", "broadcast")
     add("🎟 مدیریت تخفیف", "admin_discount", "discounts")
     add("🤝 نمایندگی (تخفیف VIP)", "admin_agency", "agency")
     add("🗂 دسته‌بندی‌های VIP", "admin_vip_categories", "plans")
-    add("🎮 دسته‌بندی‌های Gaming", "admin_gaming_categories", "plans")
-    add("📦 نگاشت پلن‌ها به پنل فعال", "admin_marzban", "vpn_panel")
+    add("📦 نگاشت پلن‌ها به پنل فعال", "admin_marzban", "plans")
     add("🛡️ اتصال پنل پاسارگارد", "admin_pasargad", "vpn_panel")
     add("🔀 انتخاب پنل VPN فعال", "admin_panel_choose", "vpn_panel")
-    add("ℹ️ اطلاعات ربات", "admin_botinfo", "botinfo")
-    add("🎬 استیکرهای منو", "admin_stickers", "stickers")
     add("🤝 مدیریت دعوت‌ها", "admin_referrals", "referrals")
     add("📚 مدیریت راهنما", "admin_guides", "guides")
-    add("📢 پیام همگانی", "admin_broadcast", "broadcast")
+    add("📝 مدیریت متن‌های کاربر", "admin_texts", "texts")
+    add("🦖 لاگ خطاها", "errlog", "logs")
+    add("ℹ️ اطلاعات ربات", "admin_botinfo", "botinfo")
+    add("🎬 استیکرهای منو", "admin_stickers", "stickers")
     add("💾 بکاپ", "admin_backup", "backup")
+    add("🎁 تنظیم تست رایگان", "admin_free_test_settings", "settings")
+
     if is_main_admin:
-        buttons.append([InlineKeyboardButton(text="👮 مدیریت ادمین‌ها", callback_data="admin_manage_admins", style="danger")])
-    if allowed("orders_toggle"):
-        buttons.append([InlineKeyboardButton(text=("🔴 خاموش کردن سفارشات" if orders_enabled else "🟢 روشن کردن سفارشات"), callback_data=("admin_orders_off" if orders_enabled else "admin_orders_on"), style=("danger" if orders_enabled else "success"))])
+        buttons.append(InlineKeyboardButton(text="👮 مدیریت ادمین‌ها", callback_data="admin_manage_admins", style="danger"))
+
     if not buttons:
-        buttons.append([InlineKeyboardButton(text="⛔ هیچ دسترسی فعالی ندارید", callback_data="noop", style="danger")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+        buttons.append(InlineKeyboardButton(text="⛔ هیچ دسترسی فعالی ندارید", callback_data="noop", style="danger"))
+
+    return InlineKeyboardMarkup(inline_keyboard=[buttons[i:i + 2] for i in range(0, len(buttons), 2)])
 
 
 def admin_back_button():
@@ -575,7 +498,6 @@ def admin_user_actions_keyboard(uid: str, is_blocked: bool = False, show_pm_link
         [InlineKeyboardButton(text="💰 شارژ دستی", callback_data=f"custom_{uid}", style="primary")],
         [InlineKeyboardButton(text="📒 حسابداری کاربر (تراکنش‌ها/منشأ پول)", callback_data=f"accounting_{uid}_0", style="primary")],
         [InlineKeyboardButton(text="🚀 ارسال کانفیگ VIP (QR)", callback_data=f"sendvip_{uid}", style="primary")],
-        [InlineKeyboardButton(text="🎮 ارسال کانفیگ گیمینگ", callback_data=f"sendgaming_{uid}", style="primary")],
         [InlineKeyboardButton(text="📦 مشاهده و مدیریت سرویس‌های کاربر", callback_data=f"svcs_{uid}", style="primary")],
         [block_btn],
         [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_back", style="primary")],
@@ -612,60 +534,52 @@ def admin_purchase_notify_keyboard(uid: str, plan_key: str | None = None, order_
     suffix = f"|{order_id}" if order_id else ""
     oid = order_id or 0
 
-    # اگر پنل مرزبان فعال است، این پلن VIP باشد (نه Gaming) و برای دسته‌بندی‌اش
-    # یک planSlug نگاشت شده باشد، دکمه‌ی «ارسال خودکار از پنل» هم علاوه‌بر روش
-    # دستی (که هیچ تغییری نکرده) نمایش داده می‌شود؛ انتخاب نهایی همیشه با ادمین
-    # است. Gaming عمداً اینجا کنار گذاشته شده: طبق تصمیم صریح، بخش گیمینگ
-    # کاملاً جداست و همیشه ۱۰۰٪ دستی باقی می‌ماند و هرگز دکمه‌ی خودکار نمی‌گیرد.
-    is_gaming = bool(plan_key) and db.plan_type(plan_key) == "gaming"
+    # اگر پنل مرزبان فعال است و برای دسته‌بندی این پلن یک planSlug نگاشت شده
+    # باشد، دکمه‌ی «ارسال خودکار از پنل» هم علاوه‌بر روش دستی (که هیچ تغییری
+    # نکرده) نمایش داده می‌شود؛ انتخاب نهایی همیشه با ادمین است.
     auto_row = []
-    if vpn_panel.active_panel() and plan_key and not is_gaming:
+    if vpn_panel.active_panel() and plan_key:
         mapping = db.get_marzban_plan_map_for_plan_key(plan_key)
         if mapping:
             auto_row = [[InlineKeyboardButton(
                 text="📤 ارسال خودکار از پنل فعال", callback_data=f"marzbansend|{uid}|{plan_key}|{oid}"
             , style="primary")]]
 
-    if is_gaming:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎮 ارسال کانفیگ گیمینگ", callback_data=f"sendgaming_{uid}{suffix}", style="primary")],
-        ])
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 ارسال کانفیگ VIP (QR) — دستی", callback_data=f"sendvip_{uid}{suffix}", style="primary")],
         *auto_row,
     ])
 
 
-def admin_custom_order_card_approval_keyboard(order_id: int):
+
+
+
+
+
+
+# شناسه ثابت بخش‌های راهنمایی که برای دکمه‌های تحویل سرویس انتخاب شده‌اند.
+# این اعداد همان id ستون جدول guides هستند و با تغییر عنوان راهنماها، مقصد دکمه‌ها تغییر نمی‌کند.
+DELIVERY_APPS_GUIDE_ID = 8
+DELIVERY_CONNECTION_GUIDE_ID = 4
+
+
+def config_delivery_keyboard(guide_url: str | None = None):
+    """دکمه‌های شیشه‌ای تحویل سرویس؛ هر دکمه مستقیماً همان بخش راهنمای مشخص‌شده را باز می‌کند."""
+    apps_text = db.get_text_override("service_delivery_apps_button", "📱 لینک برنامه‌ها")
+    connection_text = db.get_text_override("service_delivery_connection_button", "🔧 نحوه اتصال کانفینگ")
+
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ تأیید پرداخت", callback_data=f"approvecustom_{order_id}", style="success")],
-        [InlineKeyboardButton(text="❌ رد رسید", callback_data=f"rejectcustom_{order_id}", style="danger")],
+        [InlineKeyboardButton(
+            text=apps_text,
+            callback_data=f"guideopen_{DELIVERY_APPS_GUIDE_ID}",
+            style="primary",
+        )],
+        [InlineKeyboardButton(
+            text=connection_text,
+            callback_data=f"guideopen_{DELIVERY_CONNECTION_GUIDE_ID}",
+            style="primary",
+        )],
     ])
-
-
-def admin_custom_order_notify_keyboard(order_id: int):
-    buttons = [
-        [InlineKeyboardButton(text="📤 شروع ارسال کانفیگ — دستی", callback_data=f"sendcustomorder_{order_id}", style="primary")],
-    ]
-    if vpn_panel.active_panel():
-        buttons.append([InlineKeyboardButton(
-            text="🧩 ساخت خودکار از پنل فعال (کانفیگ خودتو بساز)",
-            callback_data=f"marzbancustom_{order_id}", style="primary",
-        )])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def admin_gaming_files_done_keyboard(callback_data: str = "gamingfiles_done"):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ پایان ارسال فایل‌ها", callback_data=callback_data, style="success")],
-    ])
-
-
-def config_delivery_keyboard(guide_url: str):
-    buttons = []
-    if guide_url and guide_url.strip().lower().startswith(("http://", "https://")):
-        buttons.append([InlineKeyboardButton(text="🧑‍🦯 دریافت روش اتصال", url=guide_url, style="primary")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
 
 
 def ticket_reply_keyboard(uid: str):
@@ -717,16 +631,6 @@ def admin_service_detail_keyboard(cfg: dict, uid: str):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def admin_gaming_files_manage_keyboard(cfg_id: int, files: list[dict]):
-    buttons = []
-    for f in files:
-        label = f.get("file_name") or "فایل"
-        if f.get("caption"):
-            label += f" ({f['caption']})"
-        buttons.append([InlineKeyboardButton(text=f"🗑 {label}", callback_data=f"svcfiledel_{f['id']}_{cfg_id}", style="primary")])
-    buttons.append([InlineKeyboardButton(text="➕ افزودن فایل جدید", callback_data=f"svcaddfile_{cfg_id}", style="success")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data=f"svcdetail_{cfg_id}", style="primary")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def admin_purge_confirm_keyboard(cfg_id: int):
@@ -746,9 +650,8 @@ def admin_request_queue_menu(order_count: int = 0, receipt_count: int = 0):
     ])
 
 
-def admin_pending_receipts_keyboard(receipts, custom_receipts):
-    """receipts: ردیف‌های جدول pending_receipts (kind='charge' یا 'plan_card').
-    custom_receipts: ردیف‌های custom_orders با status='pending' (بساز سرویس خودت)."""
+def admin_pending_receipts_keyboard(receipts):
+    """receipts: ردیف‌های جدول pending_receipts (kind='charge' یا 'plan_card')."""
     buttons = []
     for r in receipts:
         # 🐛 فیکس: r["id"] (شناسه‌ی خود ردیف pending_receipts) را هم در callback_data می‌فرستیم تا در
@@ -765,16 +668,7 @@ def admin_pending_receipts_keyboard(receipts, custom_receipts):
                 InlineKeyboardButton(text=f"✅ {label}", callback_data=f"approvepay|{r['telegram_id']}|{r['extra']}|{r['amount']}|{r['id']}", style="success"),
                 InlineKeyboardButton(text="❌", callback_data=f"rejectpay|{r['telegram_id']}|{r['id']}", style="danger"),
             ])
-    for co in custom_receipts:
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"🛠 سفارشی {co['volume_gb']}GB/{co['days']}روز — {co['price']:,} ت",
-                callback_data=f"approvecustom_{co['id']}",
-                style="success",
-            ),
-            InlineKeyboardButton(text="❌", callback_data=f"rejectcustom_{co['id']}", style="danger"),
-        ])
-    if receipts or custom_receipts:
+    if receipts:
         buttons.append([InlineKeyboardButton(text="🧹 علامت‌گذاری همه به‌عنوان بررسی‌شده", callback_data="clearreceipts_confirm", style="primary")])
     buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_request_queue", style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -787,32 +681,30 @@ def admin_clear_receipts_confirm_keyboard():
     ])
 
 
-def admin_order_queue_keyboard(orders, custom_orders):
-    """orders: هر آیتم باید کلید 'telegram_id' هم داشته باشد (توسط admin.py قبل از صدا زدن اضافه می‌شود)."""
+def admin_order_queue_keyboard(orders):
+    """صف سفارش‌ها: ارسال دستی + ارسال خودکار از پنل فعال برای پلن‌های نگاشت‌شده."""
     buttons = []
     for o in orders:
-        icon = "🎮" if o["order_type"] == "gaming" else "🚀"
-        prefix = "sendgaming" if o["order_type"] == "gaming" else "sendvip"
+        uid = o.get("telegram_id") or ""
+        plan_key = o.get("plan_key") or ""
+        order_id = o["id"]
         buttons.append([
             InlineKeyboardButton(
-                text=f"{icon} {o['plan_name']} — {o['price']:,} ت",
-                callback_data=f"{prefix}_{o['telegram_id']}|{o['id']}", style="primary",
+                text=f"🚀 {o['plan_name']} — {o['price']:,} ت",
+                callback_data=f"sendvip_{uid}|{order_id}", style="primary",
             ),
-            InlineKeyboardButton(text="🗑", callback_data=f"dismissorder_{o['id']}", style="danger"),
+            InlineKeyboardButton(text="🗑", callback_data=f"dismissorder_{order_id}", style="danger"),
         ])
-    for co in custom_orders:
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"🛠 سفارش سفارشی #{co['id']} — {co['volume_gb']}GB/{co['days']}روز",
-                callback_data=f"sendcustomorder_{co['id']}", style="primary",
-            ),
-            InlineKeyboardButton(text="🗑", callback_data=f"dismisscustomorder_{co['id']}", style="danger"),
-        ])
-    if orders or custom_orders:
+        if plan_key:
+            buttons.append([InlineKeyboardButton(
+                text="⚡ ارسال خودکار از پنل فعال",
+                callback_data=f"marzbansend|{uid}|{plan_key}|{order_id}",
+                style="success",
+            )])
+    if orders:
         buttons.append([InlineKeyboardButton(text="🧹 پاک کردن همه‌ی سفارش‌های این صف", callback_data="clearorders_confirm", style="primary")])
     buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_request_queue", style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
 
 def admin_clear_orders_confirm_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -855,20 +747,40 @@ def user_guides_menu(guides: list):
             [InlineKeyboardButton(text=f"📖 {g['title']}", callback_data=f"guideopen_{g['id']}", style="primary")]
             for g in guides
         ]
-    buttons.append([InlineKeyboardButton(text="🏠 بازگشت به منوی اصلی", callback_data="back", style="primary")])
+    buttons.append([InlineKeyboardButton(text=t("guides_back"), callback_data="back", style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def user_guide_detail_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 بازگشت به لیست راهنما", callback_data="user_guides", style="primary")],
+        [InlineKeyboardButton(text=t("guide_detail_back"), callback_data="user_guides", style="primary")],
     ])
 
 
 def admin_guides_menu(guides: list):
     buttons = []
     for i, g in enumerate(guides):
-        buttons.append([InlineKeyboardButton(text=f"📖 {g['title']}", callback_data=f"guideadminopen_{g['id']}", style="primary")])
+        buttons.append([InlineKeyboardButton(
+            text=f"📖 {g['title']}",
+            callback_data=f"guideadminopen_{g['id']}",
+            style="primary",
+        )])
+        move_row = []
+        if i > 0:
+            move_row.append(InlineKeyboardButton(
+                text="⬆️",
+                callback_data=f"guidemove_{g['id']}_up",
+                style="primary",
+            ))
+        if i < len(guides) - 1:
+            move_row.append(InlineKeyboardButton(
+                text="⬇️",
+                callback_data=f"guidemove_{g['id']}_down",
+                style="primary",
+            ))
+        if move_row:
+            buttons.append(move_row)
+
     buttons.append([InlineKeyboardButton(text="➕ افزودن راهنما/اموزش جدید", callback_data="guidenew", style="success")])
     buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_back", style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -1073,7 +985,6 @@ def admin_agent_actions_keyboard(uid: str):
         [InlineKeyboardButton(text="💰 شارژ دستی", callback_data=f"custom_{uid}", style="primary")],
         [InlineKeyboardButton(text="📒 حسابداری کاربر (تراکنش‌ها/منشأ پول)", callback_data=f"accounting_{uid}_0", style="primary")],
         [InlineKeyboardButton(text="🚀 ارسال کانفیگ VIP (QR)", callback_data=f"sendvip_{uid}", style="primary")],
-        [InlineKeyboardButton(text="🎮 ارسال کانفیگ گیمینگ", callback_data=f"sendgaming_{uid}", style="primary")],
         [InlineKeyboardButton(text="📦 مشاهده و مدیریت سرویس‌های کاربر", callback_data=f"svcs_{uid}", style="primary")],
         [InlineKeyboardButton(text="🗑 حذف این نماینده", callback_data=f"deleteagent_{uid}", style="danger")],
         [InlineKeyboardButton(text="🔙 بازگشت به لیست نمایندگان", callback_data="admin_agency", style="primary")],
@@ -1132,65 +1043,9 @@ def admin_vip_plan_detail_keyboard(plan_key: str, category_key: str):
         [InlineKeyboardButton(text="💰 ویرایش قیمت", callback_data=f"vipplanprice_{plan_key}", style="primary")],
         [InlineKeyboardButton(text="📦 ویرایش حجم (گیگ)", callback_data=f"vipplangb_{plan_key}", style="primary")],
         [InlineKeyboardButton(text="⏳ ویرایش مدت (روز، ۰=نامحدود)", callback_data=f"vipplandays_{plan_key}", style="primary")],
+        [InlineKeyboardButton(text="👥 ویرایش سقف کاربر (۰ تا ۱۰، 0=نامحدود)", callback_data=f"vipplanuserlimit_{plan_key}", style="primary")],
         [InlineKeyboardButton(text="🗑 حذف این پلن", callback_data=f"delvipplan_{plan_key}", style="danger")],
         [InlineKeyboardButton(text="🔙 بازگشت به دسته", callback_data=f"admincat_{category_key}", style="primary")],
-    ])
-
-
-# ---------------------------------------------------------------------------
-# 🎮 دسته‌بندی‌های Gaming (پنل ادمین) — دقیقاً مثل VIP بالا: افزودن دسته‌ی
-# جدید، افزودن/ویرایش/حذف پلن داخل هر دسته + تغییر ترتیب نمایش (⬆️/⬇️).
-# ---------------------------------------------------------------------------
-def admin_gaming_categories_keyboard():
-    buttons = []
-    cats = db.get_gaming_categories()
-    for i, cat in enumerate(cats):
-        n = len(db.get_gaming_plans(cat["id"]))
-        buttons.append([InlineKeyboardButton(
-            text=f"🌐 {cat['name']} ({n} پلن)", callback_data=f"admingamingcat_{cat['key']}"
-        , style="primary")])
-        move_row = []
-        if i > 0:
-            move_row.append(InlineKeyboardButton(text="⬆️", callback_data=f"movegamingcat_{cat['key']}_up", style="primary"))
-        if i < len(cats) - 1:
-            move_row.append(InlineKeyboardButton(text="⬇️", callback_data=f"movegamingcat_{cat['key']}_down", style="primary"))
-        if move_row:
-            buttons.append(move_row)
-    buttons.append([InlineKeyboardButton(text="➕ دسته‌بندی جدید", callback_data="newgamingcat", style="primary")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_back", style="primary")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def admin_gaming_category_detail_keyboard(category_key: str):
-    cat = db.get_gaming_category(category_key)
-    buttons = []
-    if cat:
-        plans = db.get_gaming_plans(cat["id"])
-        for i, plan in enumerate(plans):
-            buttons.append([InlineKeyboardButton(
-                text=f"📦 {plan['name']} — {plan['price']:,} ت", callback_data=f"gamingplan_{plan['plan_key']}"
-            , style="primary")])
-            move_row = []
-            if i > 0:
-                move_row.append(InlineKeyboardButton(text="⬆️", callback_data=f"movegamingplan_{plan['plan_key']}_up", style="primary"))
-            if i < len(plans) - 1:
-                move_row.append(InlineKeyboardButton(text="⬇️", callback_data=f"movegamingplan_{plan['plan_key']}_down", style="primary"))
-            if move_row:
-                buttons.append(move_row)
-    buttons.append([InlineKeyboardButton(text="➕ افزودن پلن به این دسته", callback_data=f"newgamingplan_{category_key}", style="success")])
-    buttons.append([InlineKeyboardButton(text="🗑 حذف این دسته (فقط اگر خالی باشد)", callback_data=f"delgamingcat_{category_key}", style="danger")])
-    buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_gaming_categories", style="primary")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def admin_gaming_plan_detail_keyboard(plan_key: str, category_key: str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ ویرایش نام", callback_data=f"gamingplanname_{plan_key}", style="primary")],
-        [InlineKeyboardButton(text="💰 ویرایش قیمت", callback_data=f"gamingplanprice_{plan_key}", style="primary")],
-        [InlineKeyboardButton(text="📦 ویرایش حجم (گیگ)", callback_data=f"gamingplangb_{plan_key}", style="primary")],
-        [InlineKeyboardButton(text="⏳ ویرایش مدت (روز، ۰=نامحدود)", callback_data=f"gamingplandays_{plan_key}", style="primary")],
-        [InlineKeyboardButton(text="🗑 حذف این پلن", callback_data=f"delgamingplan_{plan_key}", style="danger")],
-        [InlineKeyboardButton(text="🔙 بازگشت به دسته", callback_data=f"admingamingcat_{category_key}", style="primary")],
     ])
 
 
@@ -1203,7 +1058,6 @@ def admin_marzban_menu():
         [InlineKeyboardButton(text="🚦 ترافیک/مصرف برند (/traffic)", callback_data="marzban_traffic", style="primary")],
         [InlineKeyboardButton(text="📦 مشاهده‌ی بسته‌های پنل فعال (/plans)", callback_data="marzban_plans", style="primary")],
         [InlineKeyboardButton(text="🗂 نگاشت دسته‌بندی‌های VIP", callback_data="marzban_map_vip", style="primary")],
-        [InlineKeyboardButton(text="🧩 نگاشت پیش‌فرض «بساز سرویس خودت»", callback_data="marzban_map_custom_build", style="primary")],
         [InlineKeyboardButton(text="🧪 نگاشت پیش‌فرض «تست رایگان»", callback_data="marzban_map_free_test", style="primary")],
         [InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin_back", style="primary")],
     ])
@@ -1216,7 +1070,7 @@ def marzban_back_keyboard():
 
 
 def marzban_map_category_pick_keyboard(categories: list[dict], scope: str):
-    """لیست دسته‌بندی‌های VIP یا Gaming برای انتخاب اینکه کدام‌یک نگاشت شود."""
+    """لیست دسته‌بندی‌های VIP برای انتخاب اینکه کدام‌یک نگاشت شود."""
     buttons = []
     for cat in categories:
         mapping = db.get_marzban_plan_map(scope, cat["id"])
