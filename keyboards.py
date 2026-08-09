@@ -41,9 +41,32 @@ def InlineKeyboardButton(*args, **kwargs):
 # عضویت اجباری
 # ---------------------------------------------------------------------------
 def join_channels_keyboard(channels):
-    buttons = [[InlineKeyboardButton(text=f"📢 {ch['name']}", url=ch["url"], style="primary")] for ch in channels]
-    buttons.append([InlineKeyboardButton(text="✅ عضو شدم", callback_data="check_join", style="success")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    """کیبورد عضویت اجباری در کانال‌ها.
+
+    هر عضوِ inline_keyboard باید یک InlineKeyboardButton باشد، نه یک لیستِ
+    تو در تو. قبلاً buttons خودش شامل «ردیف‌ها» بود و سپس با buttons[i:i+2]
+    دوباره داخل ردیف قرار می‌گرفت؛ در aiogram 3 این ساختار باعث ValidationError
+    می‌شد و مسیر /start را می‌شکست.
+    """
+    buttons = [
+        InlineKeyboardButton(
+            text=f"📢 {ch['name']}",
+            url=ch["url"],
+            style="primary",
+        )
+        for ch in channels
+    ]
+    buttons.append(
+        InlineKeyboardButton(
+            text="✅ عضو شدم",
+            callback_data="check_join",
+            style="success",
+        )
+    )
+
+    # دو دکمه در هر ردیف؛ خروجی دقیقاً list[list[InlineKeyboardButton]] است.
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # ---------------------------------------------------------------------------
