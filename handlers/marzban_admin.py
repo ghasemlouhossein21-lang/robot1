@@ -50,7 +50,8 @@ import marzban
 import vpn_panel
 import fsm_storage
 import bot_info
-from config import MARZBAN_ENABLED, ADMIN_ID
+from text_catalog import text as t
+from config import MARZBAN_ENABLED, ADMIN_ID, FREE_TEST_PLAN_KEY
 from states import AdminStates
 from keyboards import (
     admin_marzban_menu,
@@ -60,6 +61,7 @@ from keyboards import (
     marzban_map_vip_plans_keyboard,
     marzban_plan_pick_keyboard,
     config_delivery_keyboard,
+    main_reply_keyboard,
     admin_panel_menu,
 )
 from utils import is_duplicate_action, now_tehran_naive, parse_int_in_range
@@ -92,8 +94,47 @@ def _format_volume_gb_label(volume_gb) -> str:
     if v < 1:
         mb = round(v * 1024)
         return f"{mb} مگابایت"
-    return f"{int(v) if v.is_integer() else v:g} گیگابایت"
+    return f"{int(v) if v.is_integer() else v:g} گیگ"
+
+
+def _actual_volume_gb_from_panel_response(data, fallback=None):
+    """حجم واقعی سرویس ساخته‌شده را از پاسخ خود پنل استخراج می‌کند.
+
+    Marzban مقدار data_limit را برحسب بایت در پاسخ ساخت کاربر برمی‌گرداند.
+    بنابراین برای متن تحویلی مشتری، اولویت با مقدار واقعی ثبت‌شده در پنل است،
+    نه صرفاً حجمی که از پلن ربات ارسال شده است. اگر پنل مقدار را برنگرداند،
+    از fallback (حجم پلن/سفارش) استفاده می‌کنیم.
+    """
+    if isinstance(data, dict):
+        raw = data.get("data_limit")
+        if raw is not None:
+            try:
+                raw = int(raw)
+                if raw <= 0:
+                    return 0
+                return raw / (1024 ** 3)
+            except (TypeError, ValueError):
+                pass
+
+    return fallback
 logger = logging.getLogger(__name__)
+
+
+def _english_digits(value) -> str:
+    text = str(value if value is not None else "")
+    return text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+
+
+def _delivery_service_label(plan_name, volume_gb, days, user_limit, plan_key=None) -> str:
+    if plan_key == FREE_TEST_PLAN_KEY:
+        return "تست رایگان"
+
+    volume_text = _format_volume_gb_label(volume_gb) if volume_gb is not None else "نامشخص"
+    days_text = f"زمان {days} روزه" if days else "زمان نامحدود"
+    user_limit_text = "نامحدود کاربر" if not user_limit else f"{user_limit} کاربر"
+
+    return _english_digits(f"{volume_text} | {days_text} | {user_limit_text}")
+
 
 try:
     import qrcode
@@ -154,8 +195,10 @@ async def auto_fulfill_vip_via_marzban(bot, uid, plan_key: str, order_id: int | 
     panel_label = vpn_panel.PANEL_LABELS.get(vpn_panel.active_panel(), vpn_panel.active_panel())
     username = _generate_service_username()
     # 🆕 فیکس: قبلاً اینجا create_user_from_template صدا زده می‌شد که حجم/مدت را از روی خود تمپلیت مرزبان می‌خواند — یعنی اگر تمپلیت با حجم/مدت پلن هماهنگ نبود، مشتری حجم/مدت اشتباه می‌گرفت. الان از create_user_custom استفاده می‌شود که حجم/مدت را دقیقاً از روی خود پلن (plan['volume_gb']/plan['days']) می‌گیرد؛ تمپلیت فقط برای تنظیمات پروتکل/استخر ترافیک به کار می‌رود.
+    # 🆕 فیکس HWID Limit: سقف کاربر همزمان خود پلن (plan['user_limit']) همراه با ساخت سرویس به پنل فرستاده می‌شود.
     ok, data, msg = await vpn_panel.create_user_custom(
-        int(mapping["plan_slug"]), username, plan.get("volume_gb"), plan.get("days")
+        int(mapping["plan_slug"]), username, plan.get("volume_gb"), plan.get("days"),
+        device_limit=plan.get("user_limit"),
     )
     if not ok:
         await bot.send_message(
@@ -169,7 +212,8 @@ async def auto_fulfill_vip_via_marzban(bot, uid, plan_key: str, order_id: int | 
         return False
 
     link, slug = vpn_panel.extract_link_and_username(data)
-    snapshot = {"name": plan.get("name"), "volume_gb": plan.get("volume_gb"), "days": plan.get("days")}
+    actual_volume_gb = _actual_volume_gb_from_panel_response(data, plan.get("volume_gb"))
+    snapshot = {"name": plan.get("name"), "volume_gb": actual_volume_gb, "days": plan.get("days"), "user_limit": plan.get("user_limit")}
     ctx = {"uid": uid, "plan_key": plan_key, "order_id": order_id, "order_kind": "plan",
            "slug": slug, "snapshot": snapshot}
 
@@ -193,11 +237,11 @@ async def auto_fulfill_vip_via_marzban(bot, uid, plan_key: str, order_id: int | 
     # کاملاً مستقل است؛ به‌جای پشت‌سرهم، همزمان اجرا می‌شوند تا مشتری منتظر این پیام‌ای
     # فقط-ادمینی نماند.
     await asyncio.gather(
-        bot.send_message(
+        asyncio.ensure_future(bot.send_message(
             ADMIN_ID, f"📨 پاسخ پنل {panel_label} (ارسال خودکار بعد از پرداخت):\n<pre>{_pretty(data)}</pre>",
             parse_mode="HTML",
-        ),
-        _deliver_marzban_link(bot, ctx, link),
+        )),
+        asyncio.ensure_future(_deliver_marzban_link(bot, ctx, link)),
     )
     return True
 
@@ -253,11 +297,11 @@ async def auto_fulfill_custom_via_marzban(bot, user: dict, order_id: int, volume
     # کاملاً مستقل است؛ به‌جای پشت‌سرهم، همزمان اجرا می‌شوند تا مشتری منتظر این پیام‌ای
     # فقط-ادمینی نماند.
     await asyncio.gather(
-        bot.send_message(
+        asyncio.ensure_future(bot.send_message(
             ADMIN_ID, f"📨 پاسخ پنل {panel_label} (ارسال خودکار بعد از پرداخت):\n<pre>{_pretty(data)}</pre>",
             parse_mode="HTML",
-        ),
-        _deliver_marzban_link(bot, ctx, link),
+        )),
+        asyncio.ensure_future(_deliver_marzban_link(bot, ctx, link)),
     )
     return True
 
@@ -589,8 +633,10 @@ async def marzban_send_service(callback: types.CallbackQuery, state: FSMContext)
     await callback.answer("⏳ در حال ساخت سرویس در پنل مرزبان...")
     username = _generate_service_username()
     # 🆕 فیکس: حجم/مدت دقیقاً از روی خود پلن (plan['volume_gb']/plan['days']) گرفته می‌شود، نه از روی تمپلیت نگاشت‌شده.
+    # 🆕 فیکس HWID Limit: سقف کاربر همزمان خود پلن (plan['user_limit']) همراه با ساخت سرویس به پنل فرستاده می‌شود.
     ok, data, msg = await vpn_panel.create_user_custom(
-        int(mapping["plan_slug"]), username, plan.get("volume_gb"), plan.get("days")
+        int(mapping["plan_slug"]), username, plan.get("volume_gb"), plan.get("days"),
+        device_limit=plan.get("user_limit"),
     )
     if not ok:
         await callback.message.answer(
@@ -604,7 +650,8 @@ async def marzban_send_service(callback: types.CallbackQuery, state: FSMContext)
         return
 
     link, slug = vpn_panel.extract_link_and_username(data)
-    snapshot = {"name": plan.get("name"), "volume_gb": plan.get("volume_gb"), "days": plan.get("days")}
+    actual_volume_gb = _actual_volume_gb_from_panel_response(data, plan.get("volume_gb"))
+    snapshot = {"name": plan.get("name"), "volume_gb": actual_volume_gb, "days": plan.get("days"), "user_limit": plan.get("user_limit")}
     ctx = {"uid": uid, "plan_key": plan_key, "order_id": order_id, "order_kind": "plan",
            "slug": slug, "snapshot": snapshot}
 
@@ -621,8 +668,8 @@ async def marzban_send_service(callback: types.CallbackQuery, state: FSMContext)
     # 🆕 فیکس سرعت: دامپ خام پاسخ پنل را همزمان با ارسال واقعی کانفیگ برای مشتری اجرا می‌کنیم
     # تا مشتری منتظر پیام فقط-ادمینی نماند.
     await asyncio.gather(
-        callback.bot.send_message(callback.message.chat.id, f"📨 پاسخ پنل مرزبان:\n<pre>{_pretty(data)}</pre>", parse_mode="HTML"),
-        _deliver_marzban_link(callback.bot, ctx, link),
+        asyncio.ensure_future(callback.message.answer(f"📨 پاسخ پنل مرزبان:\n<pre>{_pretty(data)}</pre>", parse_mode="HTML")),
+        asyncio.ensure_future(_deliver_marzban_link(callback.bot, ctx, link)),
     )
 
 
@@ -690,8 +737,9 @@ async def marzban_custom_pick(callback: types.CallbackQuery, state: FSMContext):
         return
 
     link, slug = vpn_panel.extract_link_and_username(data)
+    actual_volume_gb = _actual_volume_gb_from_panel_response(data, order["volume_gb"])
     snapshot = {"name": order.get("custom_name") or "سرویس سفارشی",
-                "volume_gb": order["volume_gb"], "days": order["days"]}
+                "volume_gb": actual_volume_gb, "days": order["days"]}
     ctx = {"uid": user["telegram_id"], "plan_key": None, "order_id": order_id, "order_kind": "custom",
            "slug": slug, "snapshot": snapshot}
 
@@ -708,8 +756,8 @@ async def marzban_custom_pick(callback: types.CallbackQuery, state: FSMContext):
     # 🆕 فیکس سرعت: دامپ خام پاسخ پنل را همزمان با ارسال واقعی کانفیگ برای مشتری اجرا می‌کنیم
     # تا مشتری منتظر پیام فقط-ادمینی نماند.
     await asyncio.gather(
-        callback.bot.send_message(callback.message.chat.id, f"📨 پاسخ پنل مرزبان:\n<pre>{_pretty(data)}</pre>", parse_mode="HTML"),
-        _deliver_marzban_link(callback.bot, ctx, link),
+        asyncio.ensure_future(callback.message.answer(f"📨 پاسخ پنل مرزبان:\n<pre>{_pretty(data)}</pre>", parse_mode="HTML")),
+        asyncio.ensure_future(_deliver_marzban_link(callback.bot, ctx, link)),
     )
 
 
@@ -751,21 +799,15 @@ async def _deliver_marzban_link(bot, ctx: dict, link: str):
     name = snap.get("name") or "کاربر"
     volume_gb = snap.get("volume_gb")
     days = snap.get("days")
-    volume_text = _format_volume_gb_label(volume_gb) if volume_gb else "طبق بسته‌ی مرزبان"
+    volume_text = _format_volume_gb_label(volume_gb) if volume_gb is not None else "نامشخص"
     days_text = f"{days} روز" if days else "نامحدود"
+    user_limit = snap.get("user_limit")
     expiry_date = (now_tehran_naive() + timedelta(days=days)).strftime("%Y-%m-%d") if days else None
 
-    caption = (
-        "✅ سرویس با موفقیت ایجاد شد\n\n"
-        f"👤 نام کاربری سرویس : {name}\n"
-        "🇺🇳 لوکیشن: مولتی لوکیشن+تانل\n"
-        f"⏳ مدت زمان: {days_text}\n"
-        f"🗜 حجم سرویس: {volume_text}\n"
-        "👤 تعداد کاربر:نامحدود\n\n"
-        "لینک اتصال:\n"
-        f"{link}\n\n"
-        "🧑‍🦯 شما میتوانید شیوه اتصال را با فشردن دکمه زیر دریافت کنید."
-    )
+    delivery_label = _delivery_service_label(name, volume_gb, days, user_limit, plan_key)
+    is_test_delivery = plan_key == FREE_TEST_PLAN_KEY
+    delivery_text_key = "service_delivery_test_text" if is_test_delivery else "service_delivery_text"
+    caption = t(delivery_text_key, service_label=delivery_label, link=link)
 
     encrypted = crypto.encrypt_config(link)
     plan_name = f"{name} | {volume_text} | {days_text}"
@@ -784,15 +826,19 @@ async def _deliver_marzban_link(bot, ctx: dict, link: str):
         db.set_custom_order_status(order_id, "fulfilled")
 
     async def _send_to_customer():
+        # منوی پایینی کاربر نباید هنگام تحویل سرویس حذف شود.
+        db.set_keyboard_hidden(int(uid), False)
         if qrcode:
             photo = types.BufferedInputFile(_make_qr_bytes(link), filename="qr.png")
             sent = await bot.send_photo(
-                int(uid), photo, caption=caption, reply_markup=config_delivery_keyboard(bot_info.get('connection_guide_url'))
+                int(uid), photo, caption=caption, reply_markup=config_delivery_keyboard(is_test=is_test_delivery)
             )
+            await bot.send_message(int(uid), "⬇️ منوی اصلی در پایین صفحه قابل دسترسی است.", reply_markup=main_reply_keyboard())
             return sent.photo[-1].file_id if sent.photo else None
         await bot.send_message(
-            int(uid), caption, reply_markup=config_delivery_keyboard(bot_info.get('connection_guide_url'))
+            int(uid), caption, reply_markup=config_delivery_keyboard(is_test=is_test_delivery)
         )
+        await bot.send_message(int(uid), "⬇️ منوی اصلی در پایین صفحه قابل دسترسی است.", reply_markup=main_reply_keyboard())
         return None
 
     # 🆕 فیکس سرعت: قبلاً ارسال کانفیگ به مشتری، پیام تأیید به ادمین، و ثبت لاگ سفارش در کانال
