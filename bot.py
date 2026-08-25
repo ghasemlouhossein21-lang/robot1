@@ -27,7 +27,7 @@ import vpn_panel
 from config import TOKEN, UNIQUEPAY_ENABLED, ADMIN_ID
 from keyboards import all_reply_menu_texts
 from handlers import menu, start, wallet, profile, referral, plans, ticket, admin, marzban_admin
-from handlers.plans import finalize_online_payment, finalize_custom_online_payment
+from handlers.plans import finalize_online_payment
 from handlers.wallet import finalize_wallet_charge_online_payment
 from alerts import check_usage_alerts, CHECK_INTERVAL_SECONDS
 
