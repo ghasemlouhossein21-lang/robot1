@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram.types import FSInputFile
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from keyboards import main_reply_keyboard
 import database as db
@@ -23,47 +23,269 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TEXT_LIMIT = 4096
 
 
-def _telegram_text_units(text: str) -> int:
-    """تعداد واحدهای UTF-16 متن را حساب می‌کند.
-
-    محدودیت طول پیام تلگرام برای متن Unicode عملاً بر مبنای UTF-16 است؛ بنابراین
-    len(text) برای ایموجی‌ها ممکن است کمتر از طولی باشد که تلگرام محاسبه می‌کند.
-    """
-    return len(text.encode("utf-16-le")) // 2
+def telegram_utf16_length(text: str) -> int:
+    return len((text or "").encode("utf-16-le")) // 2
 
 
 def truncate_for_telegram(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
-    """متن را با درنظرگرفتن محدودیت واقعی Telegram کوتاه می‌کند."""
+    """کوتاه‌کردن امن متن بر اساس UTF-16 مورد استفاده Telegram."""
     if text is None:
         return text
-
-    if _telegram_text_units(text) <= limit:
+    if telegram_utf16_length(text) <= limit:
         return text
-
     suffix = "\n\n… (متن به‌دلیل محدودیت طول پیام تلگرام کوتاه شد)"
-    suffix_units = _telegram_text_units(suffix)
-    budget = max(0, limit - suffix_units)
-
-    # بیشترین تعداد code point که در بودجه‌ی UTF-16 جا می‌شود.
-    lo, hi = 0, len(text)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if _telegram_text_units(text[:mid]) <= budget:
-            lo = mid
-        else:
-            hi = mid - 1
-
-    return text[:lo] + suffix
+    available = max(0, limit - telegram_utf16_length(suffix))
+    raw = (text or "").encode("utf-16-le")[:available * 2]
+    while raw:
+        try:
+            head = raw.decode("utf-16-le")
+            break
+        except UnicodeDecodeError:
+            raw = raw[:-2]
+    else:
+        head = ""
+    return head + suffix
 
 
 def is_message_too_long_error(exc: Exception) -> bool:
-    """خطاهای مربوط به عبور متن از سقف طول Telegram را تشخیص می‌دهد."""
+    msg = str(exc).lower()
+    return "message is too long" in msg or "message_too_long" in msg
+
+
+def serialize_message_entities(entities) -> list[dict]:
+    result = []
+    for entity in entities or []:
+        try:
+            data = entity.model_dump(mode="json", exclude_none=True) if hasattr(entity, "model_dump") else dict(entity)
+            result.append({k: v for k, v in data.items() if v is not None})
+        except Exception:
+            logger.exception("خطا در serialize کردن MessageEntity")
+    return result
+
+
+def message_entities_from_dicts(entity_dicts) -> list:
+    from aiogram.types import MessageEntity
+    result = []
+    for data in entity_dicts or []:
+        try:
+            result.append(MessageEntity(**data))
+        except Exception:
+            logger.exception("MessageEntity ذخیره‌شده نامعتبر بود و نادیده گرفته شد")
+    return result
+
+
+def adjust_entities_for_replacement(entities: list, old_text: str, new_text: str, old_token: str = "{name}") -> list:
+    """offset/length Entityها را پس از جایگزینی یک placeholder اصلاح می‌کند."""
+    if old_text == new_text:
+        return entities
+    pos = old_text.find(old_token)
+    if pos < 0:
+        return entities
+
+    old_start = telegram_utf16_length(old_text[:pos])
+    old_end = old_start + telegram_utf16_length(old_token)
+    delta = telegram_utf16_length(new_text) - telegram_utf16_length(old_text)
+    new_start = old_start
+    new_token_len = telegram_utf16_length(new_text[pos:]) - telegram_utf16_length(old_text[pos + len(old_token):])
+    new_end = new_start + new_token_len
+
+    out = []
+    for e in entities:
+        start, end = int(e.offset), int(e.offset + e.length)
+        ns, ne = start, end
+        if start >= old_end:
+            ns, ne = start + delta, end + delta
+        elif end <= old_start:
+            pass
+        else:
+            if start >= old_start:
+                ns = new_start
+            if end <= old_end:
+                ne = new_end
+            else:
+                ne = end + delta
+        if ne <= ns:
+            continue
+        try:
+            out.append(e.model_copy(update={"offset": ns, "length": ne - ns}))
+        except Exception:
+            logger.exception("خطا در اصلاح offset یک MessageEntity")
+    return out
+
+
+def truncate_text_and_entities(text: str, entities: list | None, limit: int = TELEGRAM_TEXT_LIMIT):
+    """نسخه‌ی کوتاه‌شده‌ی متن را همراه Entityهای سالمِ باقی‌مانده برمی‌گرداند."""
+    safe = truncate_for_telegram(text, limit)
+    if safe == text or not entities:
+        return safe, entities or []
+    # طول بخش اصلی قبل از suffix؛ Entityهایی که کامل در این محدوده‌اند حفظ می‌شوند.
+    suffix = "\n\n… (متن به‌دلیل محدودیت طول پیام تلگرام کوتاه شد)"
+    cutoff = telegram_utf16_length(safe) - telegram_utf16_length(suffix)
+    kept = [e for e in entities if int(e.offset) + int(e.length) <= cutoff]
+    return safe, kept
+
+def is_recipient_unavailable_error(exc: Exception) -> bool:
+    """Telegram 403های دائمیِ مربوط به گیرنده را تشخیص می‌دهد.
+
+    اگر کاربر ربات را بلاک کرده باشد، هیچ retry یا fallback دیگری نباید
+    برای همان chat_id انجام شود؛ این خطا مشکل متن/کد نیست و تلاش مجدد فقط
+    لاگ و خطای اضافی تولید می‌کند.
+    """
+    if isinstance(exc, TelegramForbiddenError):
+        return True
     msg = str(exc).lower()
     return (
-        "message is too long" in msg
-        or "message_too_long" in msg
-        or "text is too long" in msg
+        "bot was blocked by the user" in msg
+        or "bot was kicked from the chat" in msg
+        or "bot was kicked from the group" in msg
+        or "bot was kicked from the supergroup" in msg
+        or "bot is not a member of the channel chat" in msg
+        or "bot is not a member of the supergroup chat" in msg
+        or "user is deactivated" in msg
+        or "chat write forbidden" in msg
     )
+
+
+async def send_photo_rich(bot, chat_id, photo, caption=None, **kwargs):
+    """Send a photo while preserving RichText caption entities."""
+    entities = getattr(caption, "entities", None) or None
+    if entities:
+        from aiogram.types import MessageEntity
+        normalized=[]
+        for raw in entities:
+            try:
+                normalized.append(MessageEntity(**raw) if isinstance(raw, dict) else raw)
+            except Exception:
+                continue
+        kwargs.pop("parse_mode", None)
+        try:
+            return await bot.send_photo(chat_id=chat_id, photo=photo, caption=str(caption), caption_entities=normalized or None, parse_mode=None, **kwargs)
+        except Exception as exc:
+            if is_recipient_unavailable_error(exc):
+                logger.info("ارسال به گیرنده %s ممکن نیست؛ احتمالاً ربات بلاک/از چت حذف شده است", chat_id)
+                return None
+            if "ENTITY_TEXT_INVALID" not in str(exc).upper():
+                raise
+    try:
+        return await bot.send_photo(chat_id=chat_id, photo=photo, caption=None if caption is None else str(caption), **kwargs)
+    except Exception as exc:
+        if is_recipient_unavailable_error(exc):
+            logger.info("ارسال عکس به %s انجام نشد؛ گیرنده دیگر در دسترس نیست", chat_id)
+            return None
+        raise
+
+
+async def edit_caption_rich(target, caption, **kwargs):
+    """Edit a media caption while preserving RichText entities."""
+    entities = getattr(caption, "entities", None) or None
+    if entities:
+        from aiogram.types import MessageEntity
+        normalized=[]
+        for raw in entities:
+            try:
+                normalized.append(MessageEntity(**raw) if isinstance(raw, dict) else raw)
+            except Exception:
+                continue
+        kwargs.pop("parse_mode", None)
+        try:
+            return await target.edit_caption(caption=str(caption), caption_entities=normalized or None, parse_mode=None, **kwargs)
+        except Exception as exc:
+            if is_recipient_unavailable_error(exc):
+                logger.info("ویرایش کپشن انجام نشد؛ گیرنده/چت دیگر در دسترس نیست")
+                return None
+            if "ENTITY_TEXT_INVALID" not in str(exc).upper():
+                raise
+    return await target.edit_caption(caption=str(caption), **kwargs)
+
+
+async def send_rich(bot, chat_id, value=None, **kwargs):
+    """Send text through Bot while preserving RichText Telegram entities."""
+    if value is None and "text" in kwargs:
+        value = kwargs.pop("text")
+    entities = getattr(value, "entities", None) or None
+    if entities:
+        from aiogram.types import MessageEntity
+        normalized = []
+        for raw in entities:
+            try:
+                normalized.append(MessageEntity(**raw) if isinstance(raw, dict) else raw)
+            except Exception:
+                continue
+        kwargs.pop("parse_mode", None)
+        try:
+            return await bot.send_message(chat_id=chat_id, text=str(value), entities=normalized or None, parse_mode=None, **kwargs)
+        except Exception as exc:
+            if is_recipient_unavailable_error(exc):
+                logger.info("ارسال متن به %s انجام نشد؛ گیرنده ربات را بلاک/حذف کرده است", chat_id)
+                return None
+            if "ENTITY_TEXT_INVALID" not in str(exc).upper():
+                raise
+            logger.warning("Stored Telegram entities rejected while sending rich text; falling back to plain text: %s", exc)
+    try:
+        return await bot.send_message(chat_id=chat_id, text=str(value), **kwargs)
+    except Exception as exc:
+        if is_recipient_unavailable_error(exc):
+            logger.info("ارسال متن ساده به %s انجام نشد؛ گیرنده دیگر در دسترس نیست", chat_id)
+            return None
+        raise
+
+
+async def answer_rich(target, value, **kwargs):
+    """Send editable text while preserving Telegram MessageEntity metadata."""
+    entities = getattr(value, "entities", None) or None
+    if entities:
+        from aiogram.types import MessageEntity
+        normalized = []
+        for raw in entities:
+            try:
+                normalized.append(MessageEntity(**raw) if isinstance(raw, dict) else raw)
+            except Exception:
+                continue
+        kwargs.pop("parse_mode", None)
+        try:
+            return await target.answer(text=str(value), entities=normalized or None, parse_mode=None, **kwargs)
+        except Exception as exc:
+            if is_recipient_unavailable_error(exc):
+                logger.info("پاسخ به گیرنده انجام نشد؛ چت دیگر در دسترس نیست")
+                return None
+            if "ENTITY_TEXT_INVALID" not in str(exc).upper():
+                raise
+    try:
+        return await target.answer(text=str(value), **kwargs)
+    except Exception as exc:
+        if is_recipient_unavailable_error(exc):
+            logger.info("پاسخ ساده به گیرنده انجام نشد؛ چت دیگر در دسترس نیست")
+            return None
+        raise
+
+
+async def edit_rich(target, value, **kwargs):
+    """Edit a message while preserving Telegram MessageEntity metadata."""
+    entities = getattr(value, "entities", None) or None
+    if entities:
+        from aiogram.types import MessageEntity
+        normalized = []
+        for raw in entities:
+            try:
+                normalized.append(MessageEntity(**raw) if isinstance(raw, dict) else raw)
+            except Exception:
+                continue
+        kwargs.pop("parse_mode", None)
+        try:
+            return await target.edit_text(text=str(value), entities=normalized or None, parse_mode=None, **kwargs)
+        except Exception as exc:
+            if is_recipient_unavailable_error(exc):
+                logger.info("ویرایش پیام انجام نشد؛ چت دیگر در دسترس نیست")
+                return None
+            if "ENTITY_TEXT_INVALID" not in str(exc).upper():
+                raise
+    try:
+        return await target.edit_text(text=str(value), **kwargs)
+    except Exception as exc:
+        if is_recipient_unavailable_error(exc):
+            logger.info("ویرایش ساده پیام انجام نشد؛ چت دیگر در دسترس نیست")
+            return None
+        raise
 
 
 def get_main_keyboard(user_id):
@@ -77,7 +299,6 @@ def get_main_keyboard(user_id):
     except Exception:
         logger.exception("خطا در بررسی وضعیت مخفی‌بودن منوی پایین صفحه")
     return main_reply_keyboard()
-
 
 # سرور ربات (Render) با ساعت UTC کار می‌کند و همه‌ی رشده‌های زمانی ذخیره‌شده در
 # دیتابیس (created_at/expires_at و ...) بر همین اساس هستند؛ برای اینکه چیزی که
@@ -250,8 +471,7 @@ def invalidate_section_sticker_cache(section_key: str) -> None:
 
 # نگاشت یک کلید کوتاه و معنادار (که در کد handlerها استفاده می‌شود) به نام
 # فایل واقعی استیکر روی دیسک (پوشه‌ی stickers/ کنار همین پروژه).
-STICKERS_DIR = os.path.join(os.path.dirname(
-    os.path.abspath(__file__)), "stickers")
+STICKERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stickers")
 STICKER_FILES = {
     "free_test": "test.webm",       # دکمه‌ی «🎁 تست رایگان»
     "buy_plans": "service.webm",    # دکمه‌ی «🛒 خرید اشتراک»
@@ -331,8 +551,7 @@ def _get_section_sticker_override(sticker_key: str) -> dict | None:
         import database as db  # lazy import: از وابستگی حلقوی بین ماژول‌ها جلوگیری می‌شود
         override = db.get_section_sticker(sticker_key)
     except Exception:
-        logger.exception(
-            "خطا در خواندن تنظیمات استیکر بخش '%s' از دیتابیس", sticker_key)
+        logger.exception("خطا در خواندن تنظیمات استیکر بخش '%s' از دیتابیس", sticker_key)
     _section_sticker_override_cache[sticker_key] = override
     _section_sticker_override_cache_loaded.add(sticker_key)
     return override
@@ -346,6 +565,7 @@ async def show_menu_with_sticker(
     reply_markup=None,
     parse_mode: str | None = None,
     show_main_keyboard: bool = True,
+    entities=None,
 ):
     """یک پیام منوی تازه می‌فرستد (همیشه پیام جدید، نه ویرایش پیام قبلی) و اگر
     sticker_key داده شده باشد، درست بالای همان منو یک استیکر می‌فرستد.
@@ -368,6 +588,10 @@ async def show_menu_with_sticker(
     مقدار None باشد، فقط پیام منو (بدون استیکر جدید) فرستاده می‌شود؛ برای مرحله‌هایی
     که نباید استیکری در آن‌ها نمایش داده شود (مثلاً مرحله‌ی نهایی انتخاب/انجام پرداخت).
     """
+    # RichText may carry Telegram entities (including Premium/Custom Emoji).
+    # If callers pass a RichText value, automatically forward its entities.
+    if entities is None:
+        entities = getattr(text, "entities", None)
     # منوی قبلی حذف نمی‌شود.
     prev = _last_sticker_menu.get(chat_id)
 
@@ -400,8 +624,7 @@ async def show_menu_with_sticker(
                         sticker_source = ("path", candidate_path)
 
         if sticker_source:
-            sticker_reply_markup = get_main_keyboard(
-                chat_id) if show_main_keyboard else None
+            sticker_reply_markup = get_main_keyboard(chat_id) if show_main_keyboard else None
             try:
                 if sticker_source[0] == "file_id":
                     sticker_msg = await bot.send_sticker(
@@ -420,50 +643,47 @@ async def show_menu_with_sticker(
             except Exception:
                 logger.exception("خطا در ارسال استیکر تست '%s'", sticker_key)
 
-    if new_sticker_msg_id is None and show_main_keyboard:
-        # 🆕 فیکس: تا امروز وقتی استیکری فرستاده نمی‌شد (چون ادمین برای این بخش
-        # استیکری آپلود نکرده بود، یا این مرحله عمداً بدون استیکر است — مثلاً
-        # مراحل نهایی پرداخت/رسید)، منوی دائمی پایین صفحه هیچ‌وقت در این مسیر
-        # تازه نمی‌شد. چون پیام مرحله‌ی قبل (که همان منو را حمل می‌کرد) همین‌جا
-        # در جابه‌جایی بعدی حذف می‌شود، بعد از چند مرحله (دقیقاً مثل کل فرایند
-        # خرید) منو کامل از دید کاربر گم می‌شد. برای همان تضمینی که برای
-        # استیکرهای واقعی وجود دارد، این‌جا هم یک پیام کاملاً نامرئی فقط برای
-        # حمل/تازه‌سازی همان منو فرستاده می‌شود (و مثل استیکر، در مرحله‌ی بعد
-        # خودش پاک می‌شود؛ هیچ اثر دیداری اضافه‌ای برای کاربر ندارد).
-        # 🐛 فیکس: کاراکتر قبلی «⠀» (U+2800 Braille Pattern Blank) توسط تلگرام به‌عنوان متن کاملاً خالی رد می‌شد
-        # (خطای دقیق تلگرام: "text must be non-empty")، در نتیجه این پیام نامرئی هرگز ارسال نمی‌شد و منوی دائمی
-        # پایین صفحه (وقتی استیکری فرستاده نمی‌شود) دوباره تازه نمی‌شد. به جایش از "⠀"، از "ㅤ"
-        # (U+3164 Hangul Filler) استفاده می‌شود: دقیقاً مثل قبل برای چشم کاربر کاملاً خالی/نامرئی است، ولی
-        # چون یک حرف واقعی (نه کاراکتر جداکننده/فضای‌خالی) است، تلگرام آن را خالی تلقی نمی‌کند.
-        try:
-            invisible_msg = await bot.send_message(chat_id, "ㅤ", reply_markup=get_main_keyboard(chat_id))
-            new_sticker_msg_id = invisible_msg.message_id
-        except Exception:
-            logger.exception(
-                "خطا در ارسال پیام نامرئی تازه‌سازی منوی پایین صفحه")
+    # پیام نامرئی ارسال نمی‌کنیم؛ Telegram ممکن است کاراکترهای نامرئی را
+    # MESSAGE_EMPTY تشخیص دهد. پیام اصلی منو در ادامه‌ی همین تابع ارسال می‌شود.
 
     try:
-        menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+        menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode, entities=entities)
     except TelegramBadRequest as e:
         # 🆕 فیکس: اگر متنی که ادمین از پنل ویرایش کرده (مثلاً پیام خوش‌آمدگویی /start یا هر متن قابل‌ویرایش دیگری) از سقف مجاز تلگرام برای متن پیام (۴۰۹۶ کاراکتر) بلندتر باشد، تلگرام خطای «Bad Request: MESSAGE_TOO_LONG» برمی‌گرداند و قبلاً هیچ‌وقت دوباره تلاشی نمی‌شد (چون فقط حالت parse_mode دست‌کاری می‌شد)؛ برای کاربرانی که تازه روی /start می‌زدند (بیشتر از همه کاربران جدید) کل منوی /start با ارور مواجه می‌شد. حالا اگر خطا دقیقاً همین باشد، متن کوتاه شده دوباره فرستاده می‌شود تا کاربر هیچ‌وقت با خطا مواجه نشود.
         if is_message_too_long_error(e):
             logger.error(
-                "متن منو (پیش‌نمایش %d کاراکتر) از سقف تلگرام (۴۰۹۶) بیشتر بود؛ کوتاه شد و دوباره فرستاده شد.", len(
-                    text),
+                "متن منو (پیش‌نمایش %d کاراکتر) از سقف تلگرام (۴۰۹۶) بیشتر بود؛ کوتاه شد و دوباره فرستاده شد.", len(text),
             )
-            safe_text = truncate_for_telegram(text)
+            safe_text, safe_entities = truncate_text_and_entities(text, entities)
             try:
-                menu_msg = await bot.send_message(chat_id=chat_id, text=safe_text, reply_markup=reply_markup, parse_mode=parse_mode)
+                menu_msg = await bot.send_message(chat_id=chat_id, text=safe_text, reply_markup=reply_markup, parse_mode=parse_mode, entities=safe_entities)
             except TelegramBadRequest:
-                menu_msg = await bot.send_message(chat_id=chat_id, text=safe_text, reply_markup=reply_markup, parse_mode=None)
+                try:
+                    menu_msg = await bot.send_message(chat_id=chat_id, text=safe_text, reply_markup=reply_markup, parse_mode=None, entities=None)
+                except Exception:
+                    # 🆕 لایه‌ی محافظتی نهایی: اگر حتی نسخه‌ی کوتاه‌شده و بدون‌فرمت هم رد شد (مثلاً چون خودِ کیبورد/دکمه مشکل دارد، نه متن)، دیگر هیچ تلاش دیگری برای این نسخه نمی‌شود؛ همان پیام حداقلی نهایی (بدون کیبورد سفارشی) فرستاده می‌شود تا کاربر هیچ‌وقت با سکوت کامل مواجه نشود.
+                    logger.exception("حتی نسخه‌ی کوتاه‌شده‌ی پیام منو هم ارسال نشد؛ آخرین تلاش بدون کیبورد/فرمت انجام می‌شود")
+                    menu_msg = await _send_last_resort_menu_message(bot, chat_id, text)
         else:
-            # 🆕 فیکس: اگر متن (مثلاً متن سفارشی ویرایش کارت که ادمین از پنل ویرایش کرده) شامل کاراکترهای خاص HTML/Markdown نامعتبر (مثلاً < یا > تکی بدون بسته شدن) باشد و تلگرام نتواند پارسش کند، تلاش برای ارسال مجدد نمی‌شود و کاربر اصلاً منوی را دریافت نمی‌کرد، پس به‌جای شکست کامل، همان متن بدون هیچ قالب‌بندی (parse_mode=None) دوباره فرستاده می‌شود (مونواسپیس و سایر تگ‌ها/ستاره‌ها اینجا به‌صورت متن خام نمایش داده می‌شوند).
-            logger.exception(
-                "خطا در ارسال پیام منو با parse_mode='%s'، دوباره بدون فرمت ارسال می‌شود", parse_mode)
-            menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=None)
-    _last_sticker_menu[chat_id] = {
-        "sticker_msg_id": new_sticker_msg_id, "menu_msg_id": menu_msg.message_id}
+            # 🆕 فیکس: اگر متن (مثلاً متن سفارشی ویرایش کارت که ادمین از پنل ویرایش کرده) شامل کاراکترهای خاص HTML/Markdown نامعتبر (مثلاً < یا > تکی بدون بسته شدن) باشد و تلگرام نتواند پارسش کند، یا حتی خودِ reply_markup (مثلاً لینک نامعتبر یک دکمه‌ی کانال اجباری) مشکل داشته باشد، قبلاً فقط parse_mode دوباره تلاش می‌شد و اگر مشکل از کیبورد بود همان تلاش دوباره هم شکست می‌خورد و کاربر هیچ پیامی دریافت نمی‌کرد. حالا اگر تلاش دوم هم شکست بخورد، آخرین لایه‌ی محافظتی (بدون کیبورد/فرمت) اجرا می‌شود.
+            logger.exception("خطا در ارسال پیام منو با parse_mode='%s'، دوباره بدون فرمت ارسال می‌شود", parse_mode)
+            try:
+                menu_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=None)
+            except Exception:
+                logger.exception("خطای غیرمنتظره‌ی دیگر (احتمالاً خودِ کیبورد/دکمه نامعتبر است)؛ آخرین تلاش بدون کیبورد/فرمت انجام می‌شود")
+                menu_msg = await _send_last_resort_menu_message(bot, chat_id, text)
+    except Exception:
+        # 🆕 لایه‌ی محافظتی نهایی برای هر خطای کاملاً غیرمنتظره‌ی دیگر (نه فقط TelegramBadRequest) که ممکن است در ارسال پیام منو رخ دهد؛ هدف این است که این تابع هرگز کاربر را بدون هیچ پاسخی رها نکند.
+        logger.exception("خطای کاملاً غیرمنتظره در ارسال پیام منو؛ آخرین تلاش بدون کیبورد/فرمت انجام می‌شود")
+        menu_msg = await _send_last_resort_menu_message(bot, chat_id, text)
+    _last_sticker_menu[chat_id] = {"sticker_msg_id": new_sticker_msg_id, "menu_msg_id": menu_msg.message_id}
     return menu_msg
+
+
+async def _send_last_resort_menu_message(bot, chat_id: int, text: str):
+    """آخرین لایه‌ی محافظتی داخل show_menu_with_sticker: وقتی حتی نسخه‌ی کوتاه‌شده/بدون‌فرمت هم ارسال نشد (مثلاً چون خودِ کیبورد همراهش نامعتبر بود، نه متن)، بدون هیچ کیبورد سفارشی و فرمتی، و با متنی کاملاً کوتاه، یک پیام حداقلی می‌فرستد تا کاربر هرگز با سکوت کامل مواجه نشود."""
+    minimal_text = truncate_for_telegram(text, 1000) if text else "🏠 خوش آمدید!"
+    return await bot.send_message(chat_id=chat_id, text=minimal_text)
 
 
 async def send_notification_sticker(bot, chat_id: int, sticker_key: str) -> None:
@@ -487,8 +707,11 @@ async def send_notification_sticker(bot, chat_id: int, sticker_key: str) -> None
         return
     try:
         await bot.send_sticker(chat_id, sticker=override["file_id"])
-    except Exception:
-        logger.exception("خطا در ارسال استیکر اطلاع‌رسانی '%s'", sticker_key)
+    except Exception as exc:
+        if is_recipient_unavailable_error(exc):
+            logger.info("ارسال استیکر '%s' انجام نشد؛ گیرنده دیگر در دسترس نیست", sticker_key)
+        else:
+            logger.exception("خطا در ارسال استیکر اطلاع‌رسانی '%s'", sticker_key)
 
 
 async def send_admin_task_message(bot, main_admin_id: int, permission: str, text: str, reply_markup=None, parse_mode=None):
@@ -510,7 +733,6 @@ async def send_admin_task_message(bot, main_admin_id: int, permission: str, text
         except Exception:
             pass
     return sent
-
 
 async def forward_admin_task_message(bot, main_admin_id: int, permission: str, from_chat_id: int, message_id: int):
     try:
